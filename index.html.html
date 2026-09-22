@@ -1,0 +1,890 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geo Mengabdi - GeoCare Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-app.js";
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, deleteDoc, doc, updateDoc, setDoc, getDoc, getDocs, onSnapshot, arrayUnion, arrayRemove, query, orderBy, where } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-firestore.js";
+        import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-storage.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDZDZjIZsrtAkjukNhXaClUoPrl0cVyvW8",
+            authDomain: "geo-mengabdi.firebaseapp.com",
+            projectId: "geo-mengabdi",
+            storageBucket: "geo-mengabdi.appspot.com",
+            messagingSenderId: "713746496745",
+            appId: "1:713746496745:web:d8723beee8c70d56fac478",
+            measurementId: "G-N4CF0Z8N9D"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const storage = getStorage(app);
+        const provider = new GoogleAuthProvider();
+
+        let currentUser = null;
+        let isAdmin = false;
+        let mapInstance = null; 
+        let trackChartInstance = null;
+        let itemToDelete = null; 
+        let currentChatPartnerUid = null;
+        let chatUnsubscribe = null;
+        let previousViewBeforeUser = 'view-beranda';
+
+        // ================= AUTHENTICATION & SESSION =================
+        document.getElementById('btn-login').addEventListener('click', () => {
+            signInWithPopup(auth, provider).catch(err => alert("Gagal Login: " + err.message));
+        });
+
+        window.logout = () => signOut(auth).then(() => { localStorage.removeItem('saved_user_uid'); location.reload(); });
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                currentUser = user;
+                isAdmin = (user.email === 'admingeomengabdi@gmail.com');
+                const userDocRef = doc(db, "users", user.uid);
+                const userSnap = await getDoc(userDocRef);
+
+                if (userSnap.exists()) {
+                    const uData = userSnap.data();
+                    if (uData.statusBlokir && uData.statusBlokir !== 'aktif') {
+                        checkBannedStatus(uData);
+                        return;
+                    }
+                }
+
+                document.getElementById('login-screen').classList.add('hidden');
+                localStorage.setItem('saved_user_uid', user.uid);
+                
+                if (isAdmin) {
+                    showMainApp();
+                } else {
+                    if (!userSnap.exists() || !userSnap.data().username) {
+                        document.getElementById('username-modal').classList.remove('hidden');
+                    } else if (!localStorage.getItem('profileComplete_' + user.uid)) {
+                        document.getElementById('profile-modal').classList.remove('hidden');
+                        document.getElementById('prof-email').value = user.email;
+                    } else {
+                        showMainApp();
+                    }
+                }
+            } else {
+                if (!localStorage.getItem('saved_user_uid')) {
+                    document.getElementById('login-screen').classList.remove('hidden');
+                    document.getElementById('main-app').classList.add('hidden');
+                }
+            }
+        });
+
+        function checkBannedStatus(uData) {
+            document.getElementById('login-screen').classList.add('hidden');
+            document.getElementById('main-app').classList.add('hidden');
+            const bannedModal = document.getElementById('banned-modal');
+            const bannedText = document.getElementById('banned-reason-text');
+            if (uData.statusBlokir === 'permanen') bannedText.innerText = "Akun Anda telah diblokir secara PERMANEN.";
+            else bannedText.innerText = `Akun Anda diblokir sementara hingga ${new Date(uData.tanggalBukaBlokir).toLocaleDateString('id-ID')}.`;
+            bannedModal.classList.remove('hidden');
+        }
+
+        // ================= SETUP USERNAME & PROFIL =================
+        window.saveUsername = async (e) => {
+            e.preventDefault();
+            const usernameInput = document.getElementById('input-username').value.trim().toLowerCase();
+            const warningEl = document.getElementById('username-warning');
+            if (!usernameInput) return;
+
+            const q = query(collection(db, "users"), where("username", "==", usernameInput));
+            const querySnapshot = await getDocs(q);
+            let isDuplicate = false;
+            querySnapshot.forEach((d) => { if (d.id !== currentUser.uid) isDuplicate = true; });
+
+            if (isDuplicate) { warningEl.classList.remove('hidden'); return; }
+            warningEl.classList.add('hidden');
+
+            try {
+                await setDoc(doc(db, "users", currentUser.uid), {
+                    uid: currentUser.uid, email: currentUser.email,
+                    nama: currentUser.displayName || "Warga", username: usernameInput,
+                    biodata: "Warga pemerhati lingkungan GeoCare.",
+                    fotoProfil: currentUser.photoURL || "https://iili.io/J2r6Wba.png",
+                    followers: [], following: [], followRequests: [], isPrivate: false, statusBlokir: 'aktif'
+                }, { merge: true });
+
+                document.getElementById('username-modal').classList.add('hidden');
+                document.getElementById('profile-modal').classList.remove('hidden');
+                document.getElementById('prof-email').value = currentUser.email;
+            } catch (err) { alert("Gagal menyimpan username: " + err.message); }
+        };
+
+        window.saveProfile = async (e) => {
+            e.preventDefault();
+            const telepon = document.getElementById('prof-telepon').value;
+            const alamat = document.getElementById('prof-alamat').value;
+            const ttl = document.getElementById('prof-ttl').value;
+
+            try {
+                await updateDoc(doc(db, "users", currentUser.uid), { telepon, alamat, ttl, statusBlokir: 'aktif' });
+                localStorage.setItem('profileComplete_' + currentUser.uid, 'true');
+                document.getElementById('profile-modal').classList.add('hidden');
+                showMainApp();
+            } catch(err) { alert("Gagal menyimpan profil: " + err.message); }
+        };
+
+        function showMainApp() {
+            document.getElementById('main-app').classList.remove('hidden');
+            document.querySelectorAll('.admin-only').forEach(el => el.style.display = isAdmin ? 'inline-block' : 'none');
+
+            loadInformasi(); loadMap(); loadEdukasi(); loadTrackRecordData(); loadMyProfileData(); loadNotificationsAndMessages();
+            if (isAdmin) loadAdminUserList();
+            switchView('view-beranda', 'Beranda Utama');
+        }
+
+        // ================= NAVIGASI & TAMPILAN =================
+        window.switchView = (viewId, title) => {
+            const activeViewEl = document.querySelector('.app-view:not(.hidden)');
+            if (activeViewEl && activeViewEl.id !== 'view-user-profile' && viewId !== 'view-user-profile') previousViewBeforeUser = activeViewEl.id;
+
+            document.querySelectorAll('.app-view').forEach(el => el.classList.add('hidden'));
+            document.getElementById(viewId).classList.remove('hidden');
+            document.getElementById('page-title').innerText = title;
+            document.getElementById('btn-back').classList.toggle('hidden', viewId === 'view-beranda');
+
+            if (viewId === 'view-peta' && mapInstance) setTimeout(() => mapInstance.invalidateSize(), 100);
+            document.getElementById('sidebar-menu').classList.add('-translate-x-full');
+        };
+
+        window.goBackFromUserProfile = () => switchView(previousViewBeforeUser, 'Beranda Utama');
+        window.toggleSidebarMobile = () => document.getElementById('sidebar-menu').classList.toggle('-translate-x-full');
+
+        window.toggleNightMode = () => {
+            document.body.classList.toggle('dark-mode');
+            const isDark = document.body.classList.contains('dark-mode');
+            localStorage.setItem('night_mode', isDark);
+            document.getElementById('night-mode-text').innerText = isDark ? "☀️ Light Mode" : "🌙 Night Mode";
+        };
+
+        window.loadNightModePref = () => {
+            if (localStorage.getItem('night_mode') === 'true') {
+                document.body.classList.add('dark-mode');
+                document.getElementById('night-mode-text').innerText = "☀️ Light Mode";
+            }
+        };
+
+        // ================= FITUR STATUS 24 JAM (BINGKAI INSTAGRAM) =================
+        window.openStatusViewer = async (uid, isMyProfile = false) => {
+            const snap = await getDoc(doc(db, "users", uid));
+            if(!snap.exists()) return;
+            const uData = snap.data();
+            const now = Date.now();
+
+            if (uData.statusAktifHingga && uData.statusAktifHingga > now) {
+                const q = query(collection(db, "status"), where("uid", "==", uid));
+                const statusSnaps = await getDocs(q);
+                let activeStatuses = [];
+                statusSnaps.forEach(s => {
+                    const sData = s.data();
+                    if(sData.timestamp > now - (24 * 60 * 60 * 1000)) activeStatuses.push(sData);
+                });
+                
+                if (activeStatuses.length > 0) {
+                    activeStatuses.sort((a,b) => a.timestamp - b.timestamp);
+                    const sData = activeStatuses[activeStatuses.length - 1];
+                    
+                    document.getElementById('status-viewer-img').src = uData.fotoProfil;
+                    document.getElementById('status-viewer-name').innerText = uData.nama;
+                    
+                    const mediaContainer = document.getElementById('status-viewer-media');
+                    mediaContainer.innerHTML = "";
+                    if(sData.mediaUrl) {
+                        if(sData.mediaType.startsWith('video')) {
+                            mediaContainer.innerHTML = `<video controls autoplay class="w-full h-auto max-h-[65vh] rounded-xl object-contain bg-black"><source src="${sData.mediaUrl}" type="${sData.mediaType}"></video>`;
+                        } else {
+                            mediaContainer.innerHTML = `<img src="${sData.mediaUrl}" class="w-full h-auto max-h-[65vh] rounded-xl object-contain bg-black">`;
+                        }
+                    }
+                    document.getElementById('status-viewer-text').innerText = sData.text || "";
+                    document.getElementById('status-view-modal').classList.remove('hidden');
+                    return;
+                }
+            }
+
+            if(isMyProfile) document.getElementById('add-status-modal').classList.remove('hidden');
+        };
+
+        window.submitStatus = async (e) => {
+            e.preventDefault();
+            const text = document.getElementById('status-input-text').value;
+            const file = document.getElementById('status-input-file').files[0];
+            if(!text && !file) return;
+
+            document.getElementById('status-loading').classList.remove('hidden');
+            try {
+                let mediaUrl = "", mediaType = "";
+                if (file) {
+                    const fileRef = sRef(storage, `status/${currentUser.uid}_${Date.now()}_${file.name}`);
+                    await uploadBytes(fileRef, file);
+                    mediaUrl = await getDownloadURL(fileRef);
+                    mediaType = file.type;
+                }
+
+                await addDoc(collection(db, "status"), { uid: currentUser.uid, text, mediaUrl, mediaType, timestamp: Date.now() });
+                await updateDoc(doc(db, "users", currentUser.uid), { statusAktifHingga: Date.now() + (24 * 60 * 60 * 1000) });
+
+                document.getElementById('add-status-modal').classList.add('hidden');
+                document.getElementById('status-input-text').value = "";
+                document.getElementById('status-input-file').value = "";
+                alert("Status berhasil diperbarui!");
+            } catch (err) { alert("Gagal update status: " + err.message); }
+            finally { document.getElementById('status-loading').classList.add('hidden'); }
+        };
+
+        function getProfilePicRingClass(userData) {
+            const now = Date.now();
+            if (userData.statusAktifHingga && userData.statusAktifHingga > now) {
+                return "ring-4 ring-offset-2 ring-emerald-500 p-0.5 cursor-pointer";
+            }
+            return "cursor-pointer";
+        }
+
+        // ================= FITUR CHAT DENGAN SISIPAN FILE/FOTO/VIDEO =================
+        window.openChatRoom = async (partnerUid, partnerName, partnerFoto) => {
+            currentChatPartnerUid = partnerUid;
+            document.getElementById('chat-partner-name').innerText = partnerName;
+            document.getElementById('chat-partner-img').src = partnerFoto;
+            document.getElementById('chat-modal').classList.remove('hidden');
+
+            const chatId = currentUser.uid < partnerUid ? `${currentUser.uid}_${partnerUid}` : `${partnerUid}_${currentUser.uid}`;
+            const q = query(collection(db, "chats", chatId, "messages"), orderBy("timestamp", "asc"));
+
+            if (chatUnsubscribe) chatUnsubscribe();
+            chatUnsubscribe = onSnapshot(q, (snapshot) => {
+                const container = document.getElementById('chat-messages-container');
+                container.innerHTML = "";
+
+                snapshot.forEach((docSnap) => {
+                    const msg = docSnap.data();
+                    const msgId = docSnap.id;
+                    if ((msg.deletedFor || []).includes(currentUser.uid)) return;
+                    
+                    const isMyMsg = msg.senderUid === currentUser.uid;
+                    let mediaHtml = "";
+                    
+                    if (msg.fileUrl) {
+                        if (msg.fileType.startsWith('image/')) {
+                            mediaHtml = `<img src="${msg.fileUrl}" class="w-48 h-auto rounded-xl mt-2 object-cover">`;
+                        } else if (msg.fileType.startsWith('video/')) {
+                            mediaHtml = `<video controls src="${msg.fileUrl}" class="w-48 h-auto rounded-xl mt-2"></video>`;
+                        } else {
+                            mediaHtml = `<a href="${msg.fileUrl}" target="_blank" class="flex items-center gap-2 mt-2 bg-white/20 p-2 rounded-xl text-xs font-bold hover:bg-white/30 transition"><span>📄</span> ${msg.fileName || 'Lihat Dokumen'}</a>`;
+                        }
+                    }
+
+                    container.innerHTML += `
+                        <div class="flex ${isMyMsg ? 'justify-end' : 'justify-start'} mb-3">
+                            <div class="max-w-[75%] px-4 py-2.5 rounded-2xl text-sm ${isMyMsg ? 'bg-emerald-600 text-white rounded-br-none' : 'bg-gray-100 dark:bg-zinc-800 rounded-bl-none'} shadow-sm">
+                                <p>${msg.text || ''}</p>
+                                ${mediaHtml}
+                                <div class="flex justify-between items-center gap-4 mt-1">
+                                    <span class="text-[9px] ${isMyMsg ? 'text-emerald-100' : 'text-gray-400'}">${msg.waktu || ''}</span>
+                                    ${isMyMsg ? `<button onclick="deleteChatMessage('${chatId}', '${msgId}')" class="text-[9px] text-red-200 underline">Hapus</button>` : ''}
+                                </div>
+                            </div>
+                        </div>`;
+                });
+                container.scrollTop = container.scrollHeight;
+            });
+        };
+
+        window.sendChatMessage = async (e) => {
+            e.preventDefault();
+            const textEl = document.getElementById('chat-input-text');
+            const fileEl = document.getElementById('chat-input-file');
+            const text = textEl.value.trim();
+            const file = fileEl.files[0];
+            if (!text && !file) return;
+
+            const sendBtn = document.getElementById('btn-send-chat');
+            sendBtn.disabled = true; sendBtn.innerText = "Mengirim...";
+
+            const chatId = currentUser.uid < currentChatPartnerUid ? `${currentUser.uid}_${currentChatPartnerUid}` : `${currentChatPartnerUid}_${currentUser.uid}`;
+            const waktuStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+
+            try {
+                let fileUrl = "", fileType = "", fileName = "";
+                if (file) {
+                    if (file.size > 20 * 1024 * 1024) throw new Error("Ukuran file maksimal 20MB");
+                    const fileRef = sRef(storage, `chats/${chatId}/${Date.now()}_${file.name}`);
+                    await uploadBytes(fileRef, file);
+                    fileUrl = await getDownloadURL(fileRef);
+                    fileType = file.type;
+                    fileName = file.name;
+                }
+
+                await addDoc(collection(db, "chats", chatId, "messages"), { 
+                    senderUid: currentUser.uid, text, fileUrl, fileType, fileName, 
+                    timestamp: new Date(), waktu: waktuStr, deletedFor: [] 
+                });
+
+                textEl.value = ""; fileEl.value = "";
+            } catch (err) { alert("Gagal kirim pesan: " + err.message); }
+            finally { sendBtn.disabled = false; sendBtn.innerText = "Kirim"; }
+        };
+
+        window.deleteChatMessage = async (chatId, msgId) => {
+            if(confirm("Hapus pesan ini?")) {
+                await updateDoc(doc(db, "chats", chatId, "messages", msgId), { deletedFor: arrayUnion(currentUser.uid) });
+            }
+        };
+
+        window.closeChatModal = () => { document.getElementById('chat-modal').classList.add('hidden'); if(chatUnsubscribe) chatUnsubscribe(); };
+
+        // ================= NOTIFIKASI & PESAN SAYA =================
+        function loadNotificationsAndMessages() {
+            onSnapshot(collection(db, "chats"), async (chatsSnap) => {
+                let chatRoomsList = [];
+                let hasUnreadMsg = false;
+
+                for (const chatDoc of chatsSnap.docs) {
+                    const chatId = chatDoc.id;
+                    if (!chatId.includes(currentUser.uid)) continue;
+
+                    const messagesSnap = await getDocs(collection(db, "chats", chatId, "messages"));
+                    let lastMsgText = "Belum ada pesan", lastMsgTime = "", lastTimestamp = 0;
+                    
+                    messagesSnap.forEach(msgDoc => {
+                        const msgData = msgDoc.data();
+                        if (!(msgData.deletedFor || []).includes(currentUser.uid)) {
+                            const msgTime = msgData.timestamp?.toMillis ? msgData.timestamp.toMillis() : 0;
+                            if (msgTime >= lastTimestamp) {
+                                lastTimestamp = msgTime;
+                                lastMsgText = msgData.text ? msgData.text : (msgData.fileType ? `(Mengirim Lampiran)` : 'Pesan');
+                                lastMsgTime = msgData.waktu || '';
+                            }
+                            if (msgData.senderUid !== currentUser.uid) hasUnreadMsg = true;
+                        }
+                    });
+
+                    const partnerUid = chatId.replace(currentUser.uid, '').replace('_', '');
+                    if (partnerUid && lastTimestamp > 0) {
+                        const pSnap = await getDoc(doc(db, "users", partnerUid));
+                        if (pSnap.exists()) {
+                            chatRoomsList.push({ uid: partnerUid, ...pSnap.data(), lastMsgText, lastMsgTime, lastTimestamp });
+                        }
+                    }
+                }
+
+                const msgBadge = document.getElementById('badge-pesan-saya');
+                if (msgBadge) msgBadge.classList.toggle('hidden', !hasUnreadMsg);
+
+                chatRoomsList.sort((a, b) => b.timestamp - a.timestamp);
+                const container = document.getElementById('my-messages-container');
+                if(!container) return;
+                
+                if (chatRoomsList.length === 0) container.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada percakapan.</p>`;
+                else container.innerHTML = chatRoomsList.map(room => `
+                    <div onclick="openChatRoom('${room.uid}', '${room.nama}', '${room.fotoProfil}')" class="bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl flex justify-between items-center cursor-pointer hover:bg-emerald-50/50">
+                        <div class="flex items-center gap-3">
+                            <img src="${room.fotoProfil}" class="w-12 h-12 rounded-full object-cover ${getProfilePicRingClass(room)}">
+                            <div><h4 class="font-bold text-sm text-gray-800 dark:text-white">${room.nama}</h4><p class="text-xs text-gray-500 truncate max-w-[200px]">${room.lastMsgText}</p></div>
+                        </div>
+                        <span class="text-[10px] text-gray-400">${room.lastMsgTime}</span>
+                    </div>`).join('');
+            });
+        }
+
+        // ================= POSTINGAN PRIBADI Warga =================
+        window.openAddPostModal = () => document.getElementById('add-post-modal').classList.remove('hidden');
+        window.closeAddPostModal = () => document.getElementById('add-post-modal').classList.add('hidden');
+
+        window.submitPersonalPost = async (e) => {
+            e.preventDefault();
+            const konten = document.getElementById('post-input-konten').value;
+            const file = document.getElementById('post-input-file').files[0];
+            if (!konten && !file) return;
+
+            document.getElementById('post-loading').classList.remove('hidden');
+            try {
+                let mediaUrl = "", mediaType = "";
+                if (file) {
+                    const fileRef = sRef(storage, `postingan/${currentUser.uid}_${Date.now()}_${file.name}`);
+                    await uploadBytes(fileRef, file);
+                    mediaUrl = await getDownloadURL(fileRef);
+                    mediaType = file.type;
+                }
+
+                await addDoc(collection(db, "postingan_pribadi"), {
+                    uid: currentUser.uid, konten, mediaUrl, mediaType, 
+                    likes: [], komentar: [], timestamp: Date.now()
+                });
+
+                closeAddPostModal();
+                document.getElementById('post-input-konten').value = "";
+                document.getElementById('post-input-file').value = "";
+                alert("Postingan berhasil diterbitkan!");
+            } catch (err) { alert("Gagal memposting: " + err.message); }
+            finally { document.getElementById('post-loading').classList.add('hidden'); }
+        };
+
+        function loadPersonalPosts(targetUid, containerId) {
+            const q = query(collection(db, "postingan_pribadi"), where("uid", "==", targetUid));
+            onSnapshot(q, async (snapshot) => {
+                const container = document.getElementById(containerId);
+                if(!container) return;
+                let posts = [];
+                snapshot.forEach(d => posts.push({ id: d.id, ...d.data() }));
+                posts.sort((a,b) => b.timestamp - a.timestamp);
+
+                const uSnap = await getDoc(doc(db, "users", targetUid));
+                const uData = uSnap.exists() ? uSnap.data() : { nama: "Pengguna", fotoProfil: "" };
+
+                if (posts.length === 0) {
+                    container.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada postingan.</p>`;
+                    return;
+                }
+
+                container.innerHTML = posts.map(post => {
+                    const isLiked = currentUser && post.likes.includes(currentUser.uid);
+                    let mediaHtml = "";
+                    if(post.mediaUrl) {
+                        if(post.mediaType.startsWith('video')) mediaHtml = `<video controls src="${post.mediaUrl}" class="w-full h-auto rounded-xl mt-3"></video>`;
+                        else mediaHtml = `<img src="${post.mediaUrl}" class="w-full h-auto rounded-xl mt-3 object-cover">`;
+                    }
+                    return `
+                        <div class="bg-gray-50 dark:bg-zinc-900 border dark:border-zinc-800 p-4 rounded-2xl mb-4 shadow-sm text-left">
+                            <div class="flex items-center gap-3 mb-2">
+                                <img src="${uData.fotoProfil}" class="w-10 h-10 rounded-full object-cover">
+                                <div><h4 class="font-bold text-sm">${uData.nama}</h4><span class="text-[10px] text-gray-500">${new Date(post.timestamp).toLocaleString('id-ID')}</span></div>
+                            </div>
+                            <p class="text-sm text-gray-700 dark:text-gray-300">${post.konten}</p>
+                            ${mediaHtml}
+                            <div class="flex gap-4 mt-4 pt-3 border-t dark:border-zinc-800 text-sm">
+                                <button onclick="togglePersonalPostLike('${post.id}', ${isLiked})" class="${isLiked ? 'text-red-500' : 'text-gray-500'} font-bold">❤️ ${post.likes.length}</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            });
+        }
+
+        window.togglePersonalPostLike = async (postId, isCurrentlyLiked) => {
+            const ref = doc(db, "postingan_pribadi", postId);
+            if(isCurrentlyLiked) await updateDoc(ref, { likes: arrayRemove(currentUser.uid) });
+            else await updateDoc(ref, { likes: arrayUnion(currentUser.uid) });
+        };
+
+        // ================= FITUR LAMA: INFORMASI PUBLIK & ARSIP =================
+        function loadInformasi() {
+            onSnapshot(collection(db, "informasi"), (snapshot) => {
+                const todayContainer = document.getElementById('info-today-container');
+                const pastContainer = document.getElementById('info-past-container');
+                if(!todayContainer || !pastContainer) return;
+                todayContainer.innerHTML = ""; pastContainer.innerHTML = "";
+
+                const now = new Date();
+                const todayStr = now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+
+                snapshot.forEach((docSnap) => {
+                    const docId = docSnap.id; const data = docSnap.data();
+                    const isToday = (data.tanggalFormatted === todayStr);
+                    const likesList = data.likes || [];
+                    const isLiked = currentUser && likesList.includes(currentUser.email);
+                    const komentars = data.komentar || [];
+
+                    let commentsHtml = komentars.map(k => `<div class="bg-gray-50 dark:bg-zinc-800 p-2 rounded-xl text-xs mb-2 text-left"><span class="font-bold text-emerald-800">${k.nama}</span><p>${k.teks}</p></div>`).join('');
+                    let adminBtns = isAdmin ? `<div class="mt-4 pt-4 border-t"><button onclick="deleteDoc(doc(db, 'informasi', '${docId}'))" class="text-red-500 text-xs font-bold">Hapus Postingan</button></div>` : "";
+
+                    const cardHtml = `
+                        <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl shadow-sm border border-gray-100 dark:border-zinc-800 mb-6 text-left">
+                            ${data.imageUrl ? `<img src="${data.imageUrl}" class="w-full h-56 object-cover rounded-xl mb-4">` : ""}
+                            <h3 class="font-bold text-xl text-emerald-900 dark:text-emerald-400">${data.judul}</h3>
+                            <p class="text-gray-600 dark:text-gray-300 mt-2 text-sm">${data.konten}</p>
+                            <div class="flex items-center justify-between mt-6 pt-4 border-t text-sm">
+                                <div class="flex gap-4">
+                                    <button onclick="toggleLike('${docId}', ${JSON.stringify(likesList).replace(/"/g, '&quot;')})" class="${isLiked ? 'text-red-500' : 'text-gray-500'} font-semibold">❤️ ${likesList.length}</button>
+                                    <button onclick="document.getElementById('comment-box-${docId}').classList.toggle('hidden')" class="text-gray-500 font-semibold">💬 ${komentars.length}</button>
+                                </div>
+                            </div>
+                            <div id="comment-box-${docId}" class="hidden mt-4 pt-4 border-t border-dashed">
+                                <div class="max-h-40 overflow-y-auto mb-3">${commentsHtml || '<p class="text-xs text-gray-400 italic">Belum ada komentar.</p>'}</div>
+                                <form onsubmit="submitComment(event, '${docId}')" class="flex gap-2"><input type="text" id="comment-input-${docId}" placeholder="Tulis komentar..." class="flex-1 border text-xs px-3 py-2 rounded-xl"><button type="submit" class="bg-emerald-600 text-white text-xs font-bold px-4 rounded-xl">Kirim</button></form>
+                            </div>
+                            ${adminBtns}
+                        </div>`;
+                    if (isToday) todayContainer.innerHTML += cardHtml;
+                    else pastContainer.innerHTML += cardHtml;
+                });
+            });
+        }
+
+        window.toggleLike = async (postId, currentLikes) => {
+            const ref = doc(db, "informasi", postId);
+            if (currentLikes.includes(currentUser.email)) await updateDoc(ref, { likes: arrayRemove(currentUser.email) });
+            else await updateDoc(ref, { likes: arrayUnion(currentUser.email) });
+        };
+
+        window.submitComment = async (e, postId) => {
+            e.preventDefault();
+            const inputEl = document.getElementById(`comment-input-${postId}`);
+            const text = inputEl.value.trim(); if(!text) return;
+            const ref = doc(db, "informasi", postId);
+            const namaUser = currentUser.displayName || "Warga";
+            await updateDoc(ref, { komentar: arrayUnion({ nama: namaUser, teks: text, waktu: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }) });
+            inputEl.value = "";
+        };
+
+        // ================= FITUR LAMA: EDUKASI & PETA & CHART =================
+        function loadEdukasi() {
+            onSnapshot(collection(db, "edukasi"), (snapshot) => {
+                const container = document.getElementById('edu-container');
+                if(!container) return;
+                container.innerHTML = "";
+                snapshot.forEach((d) => {
+                    const data = d.data();
+                    container.innerHTML += `<div class="bg-emerald-50 dark:bg-zinc-800 p-5 rounded-xl shadow-sm border border-emerald-100 dark:border-zinc-700 text-left"><h3 class="font-bold text-lg text-emerald-900 dark:text-emerald-400">${data.judul}</h3><p class="text-gray-700 dark:text-gray-300 mt-2 text-sm">${data.konten}</p></div>`;
+                });
+            });
+        }
+
+        function loadMap() {
+            if(!mapInstance) {
+                mapInstance = L.map('map').setView([-0.425, 116.987], 11);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+                onSnapshot(collection(db, "lokasi_sampah"), (snapshot) => {
+                    snapshot.forEach((docSnap) => {
+                        const data = docSnap.data();
+                        L.marker([data.lat, data.lng]).addTo(mapInstance).bindPopup(`<b>${data.nama}</b><br>Kode: ${data.kode}`);
+                    });
+                });
+            }
+        }
+
+        function loadTrackRecordData() {
+            onSnapshot(collection(db, "track_record"), (snapshot) => {
+                let labels = [], dataValues = [];
+                snapshot.forEach(doc => { labels.push(doc.data().bulan); dataValues.push(doc.data().berat); });
+                if(labels.length === 0) { labels = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun']; dataValues = [120, 190, 300, 250, 400, 450]; }
+                
+                const ctx = document.getElementById('trackChart').getContext('2d');
+                if(trackChartInstance) trackChartInstance.destroy();
+                trackChartInstance = new Chart(ctx, {
+                    type: 'bar',
+                    data: { labels, datasets: [{ label: 'Partisipasi Warga (Kg)', data: dataValues, backgroundColor: 'rgba(16, 185, 129, 0.7)', borderRadius: 8 }] },
+                    options: { responsive: true, maintainAspectRatio: false }
+                });
+            });
+        }
+
+        function loadMyProfileData() {
+            onSnapshot(doc(db, "users", currentUser.uid), (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    document.getElementById('my-profile-name').innerText = data.nama;
+                    document.getElementById('my-profile-username').innerText = "@" + data.username;
+                    
+                    const imgEl = document.getElementById('my-profile-img');
+                    imgEl.src = data.fotoProfil;
+                    imgEl.className = `mx-auto w-24 h-24 rounded-full object-cover shadow-md mb-2 ${getProfilePicRingClass(data)}`;
+                    imgEl.onclick = () => openStatusViewer(currentUser.uid, true);
+
+                    loadPersonalPosts(currentUser.uid, 'my-personal-posts');
+                }
+            });
+        }
+
+        window.openUserProfile = async (targetUid) => {
+            switchView('view-user-profile', 'Profil Warga');
+            const targetSnap = await getDoc(doc(db, "users", targetUid));
+            if (!targetSnap.exists()) return;
+            const tData = targetSnap.data();
+            
+            const imgEl = document.getElementById('other-profile-img');
+            imgEl.src = tData.fotoProfil;
+            imgEl.className = `mx-auto w-24 h-24 rounded-full object-cover shadow-md mb-2 ${getProfilePicRingClass(tData)}`;
+            imgEl.onclick = () => openStatusViewer(targetUid, false);
+
+            document.getElementById('other-profile-name').innerText = tData.nama;
+            document.getElementById('other-profile-username').innerText = "@" + tData.username;
+            
+            document.getElementById('other-chat-btn-container').innerHTML = `
+                <button onclick="openChatRoom('${targetUid}', '${tData.nama}', '${tData.fotoProfil}')" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold mt-4 shadow-md transition">💬 Kirim Pesan Pribadi</button>
+            `;
+
+            loadPersonalPosts(targetUid, 'other-personal-posts');
+        };
+
+        window.searchUser = async () => {
+            const queryText = document.getElementById('search-user-input').value.trim().toLowerCase();
+            const resultContainer = document.getElementById('search-user-result');
+            if(!queryText) return;
+
+            onSnapshot(collection(db, "users"), (snapshot) => {
+                resultContainer.innerHTML = "";
+                snapshot.forEach((docSnap) => {
+                    const uData = docSnap.data();
+                    if (uData.uid !== currentUser.uid && uData.username && uData.username.includes(queryText)) {
+                        resultContainer.innerHTML += `
+                            <div class="bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl flex items-center justify-between mb-2 cursor-pointer hover:bg-emerald-50/50 text-left" onclick="openUserProfile('${uData.uid}')">
+                                <div class="flex items-center gap-3">
+                                    <img src="${uData.fotoProfil}" class="w-10 h-10 rounded-full object-cover ${getProfilePicRingClass(uData)}">
+                                    <div><h4 class="font-bold text-sm">${uData.nama}</h4><p class="text-xs text-emerald-600">@${uData.username}</p></div>
+                                </div>
+                                <span class="text-xs font-bold text-emerald-700">Lihat Profil →</span>
+                            </div>`;
+                    }
+                });
+            });
+        };
+
+        function loadAdminUserList() {
+            onSnapshot(collection(db, "users"), (snapshot) => {
+                const container = document.getElementById('admin-user-list-container');
+                if(!container) return;
+                container.innerHTML = "";
+                snapshot.forEach(d => {
+                    const u = d.data();
+                    if(u.email !== 'admingeomengabdi@gmail.com') {
+                        container.innerHTML += `
+                            <div class="bg-gray-50 dark:bg-zinc-800 p-4 rounded-xl flex justify-between items-center mb-2 text-left">
+                                <div><h4 class="font-bold text-sm">${u.nama}</h4><p class="text-xs text-gray-500">${u.email}</p></div>
+                                <button onclick="updateDoc(doc(db, 'users', '${u.uid}'), { statusBlokir: 'permanen' })" class="bg-red-600 text-white text-xs px-3 py-1.5 rounded-lg font-bold">Blokir</button>
+                            </div>`;
+                    }
+                });
+            });
+        }
+    </script>
+    <style>
+        body { background-color: #ffffff !important; color: #111827 !important; }
+        .dark-mode { background-color: #121212 !important; color: #e0e0e0 !important; }
+        .dark-mode .bg-white { background-color: #1e1e1e !important; color: #e0e0e0 !important; }
+        .dark-mode .bg-gray-50 { background-color: #181818 !important; color: #e0e0e0 !important; }
+    </style>
+</head>
+<body class="font-sans text-gray-800" onload="loadNightModePref()">
+
+    <!-- LOGIN SCREEN -->
+    <div id="login-screen" class="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-600 to-teal-900 absolute inset-0 z-50">
+        <div class="bg-white p-10 rounded-3xl shadow-2xl text-center max-w-md w-full">
+            <h1 class="text-3xl font-extrabold mb-2 text-gray-900">Geo Mengabdi</h1>
+            <p class="text-emerald-600 font-medium mb-6">GeoCare - Peduli Lingkungan</p>
+            <button id="btn-login" class="w-full bg-emerald-600 text-white font-bold py-4 rounded-xl shadow-lg">Lanjutkan dengan Google</button>
+        </div>
+    </div>
+
+    <!-- MODAL BANNED -->
+    <div id="banned-modal" class="hidden fixed inset-0 bg-red-950 bg-opacity-95 flex items-center justify-center z-[100] p-4 text-center">
+        <div class="bg-white rounded-3xl p-8 max-w-md shadow-2xl">
+            <h2 class="text-2xl font-bold text-red-600 mb-2">Akses Ditolak</h2>
+            <p id="banned-reason-text" class="text-gray-600 text-sm mb-6">Akun Anda diblokir.</p>
+            <button onclick="logout()" class="w-full bg-red-600 text-white font-bold py-3 rounded-xl">Keluar</button>
+        </div>
+    </div>
+
+    <!-- MODAL USERNAME -->
+    <div id="username-modal" class="hidden fixed inset-0 bg-emerald-950 bg-opacity-90 flex items-center justify-center z-[70] p-4">
+        <div class="bg-white rounded-3xl w-full max-w-md p-8 text-center shadow-2xl">
+            <h3 class="text-2xl font-bold mb-2">Buat Username</h3>
+            <form onsubmit="saveUsername(event)">
+                <input type="text" id="input-username" required placeholder="username_unik" class="w-full border-2 p-3 rounded-xl mb-2 lowercase font-semibold">
+                <p id="username-warning" class="hidden text-xs text-red-600 mb-4">⚠️ Username sudah digunakan.</p>
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3.5 rounded-xl">Lanjutkan</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL PROFIL AWAL -->
+    <div id="profile-modal" class="hidden fixed inset-0 bg-emerald-950 bg-opacity-85 flex items-center justify-center z-[60] p-4">
+        <div class="bg-white rounded-3xl w-full max-w-md p-8 shadow-2xl">
+            <h3 class="text-2xl font-bold mb-4">Lengkapi Data Diri</h3>
+            <form onsubmit="saveProfile(event)" class="space-y-3">
+                <input type="email" id="prof-email" class="w-full border p-3 rounded-xl bg-gray-100" readonly>
+                <input type="text" id="prof-telepon" required placeholder="Nomor Telepon / WA" class="w-full border p-3 rounded-xl">
+                <textarea id="prof-alamat" required placeholder="Alamat Lengkap" class="w-full border p-3 rounded-xl h-20 resize-none"></textarea>
+                <input type="text" id="prof-ttl" required placeholder="Tempat, Tanggal Lahir" class="w-full border p-3 rounded-xl">
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl">Simpan & Masuk</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MAIN APP -->
+    <div id="main-app" class="hidden h-screen flex w-full overflow-hidden bg-white dark:bg-zinc-950">
+        
+        <!-- SIDEBAR -->
+        <aside id="sidebar-menu" class="absolute md:relative inset-y-0 left-0 transform -translate-x-full md:translate-x-0 transition duration-200 w-64 bg-emerald-900 text-white flex flex-col shadow-2xl z-40">
+            <div class="p-6 border-b border-emerald-800 flex items-center justify-between">
+                <h2 class="text-xl font-extrabold">GeoCare<span class="text-emerald-400">.</span></h2>
+                <button onclick="toggleSidebarMobile()" class="md:hidden">✕</button>
+            </div>
+            <nav class="flex-1 p-4 space-y-2 overflow-y-auto">
+                <button onclick="switchView('view-beranda', 'Beranda Utama')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">🏠 Beranda</button>
+                <button onclick="switchView('view-informasi', 'Informasi Publik')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">📢 Informasi Publik</button>
+                <button onclick="switchView('view-edukasi', 'Edukasi Sampah')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">🌱 Edukasi</button>
+                <button onclick="switchView('view-peta', 'Peta Lokasi')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">🗺️ Peta Lokasi</button>
+                <button onclick="switchView('view-track', 'Track Record')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">📊 Track Record</button>
+                <button onclick="switchView('view-pesan-saya', 'Pesan Saya')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl flex justify-between">💬 Pesan <span id="badge-pesan-saya" class="hidden w-2.5 h-2.5 bg-red-500 rounded-full"></span></button>
+                <button onclick="switchView('view-interaksi', 'Cari Warga')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">🔍 Cari Warga</button>
+                <button onclick="switchView('view-profil', 'Profil Anda')" class="w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">👤 Profil Anda</button>
+                <button onclick="switchView('view-admin-mod', 'Moderasi Akun')" class="admin-only hidden w-full text-left py-3 px-4 hover:bg-emerald-800 rounded-xl">🛡️ Moderasi Akun</button>
+            </nav>
+            <div class="p-4 border-t border-emerald-800">
+                <button onclick="logout()" class="w-full bg-red-500/20 text-red-300 py-2 rounded-lg text-sm font-semibold">Logout Keluar</button>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <main class="flex-1 flex flex-col h-screen overflow-hidden">
+            <header class="h-20 px-6 flex items-center justify-between shadow-sm border-b dark:border-zinc-800">
+                <div class="flex items-center gap-4">
+                    <button onclick="toggleSidebarMobile()" class="md:hidden text-xl font-bold">☰</button>
+                    <button id="btn-back" onclick="switchView('view-beranda', 'Beranda Utama')" class="hidden bg-emerald-50 text-emerald-700 px-3 py-2 rounded-xl text-xs font-bold">← Kembali</button>
+                    <h1 id="page-title" class="text-xl font-bold">Beranda Utama</h1>
+                </div>
+                <button onclick="toggleNightMode()" id="night-mode-text" class="bg-gray-100 dark:bg-zinc-800 px-3.5 py-2 rounded-xl text-xs font-bold">🌙 Night Mode</button>
+            </header>
+
+            <div class="flex-1 overflow-y-auto p-4 md:p-8">
+                
+                <!-- VIEW BERANDA -->
+                <div id="view-beranda" class="app-view max-w-4xl mx-auto text-center">
+                    <div class="bg-emerald-800 text-white p-10 rounded-3xl shadow-xl mb-6">
+                        <h2 class="text-3xl font-extrabold mb-2">Selamat Datang di GeoCare!</h2>
+                        <p class="text-emerald-100 text-sm">Platform aksi nyata masyarakat untuk lingkungan bersih & hijau.</p>
+                    </div>
+                </div>
+
+                <!-- VIEW INFORMASI PUBLIK -->
+                <div id="view-informasi" class="app-view hidden max-w-3xl mx-auto">
+                    <div id="info-today-container"></div>
+                    <div id="info-past-container" class="mt-6"></div>
+                </div>
+
+                <!-- VIEW EDUKASI -->
+                <div id="view-edukasi" class="app-view hidden max-w-4xl mx-auto"><div id="edu-container" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div></div>
+
+                <!-- VIEW PETA -->
+                <div id="view-peta" class="app-view hidden h-[450px] max-w-4xl mx-auto flex flex-col"><div id="map" class="w-full flex-1 rounded-2xl border"></div></div>
+
+                <!-- VIEW TRACK RECORD -->
+                <div id="view-track" class="app-view hidden max-w-4xl mx-auto"><div class="bg-white dark:bg-zinc-900 p-6 rounded-2xl shadow border h-[380px]"><canvas id="trackChart"></canvas></div></div>
+
+                <!-- VIEW PESAN SAYA -->
+                <div id="view-pesan-saya" class="app-view hidden max-w-3xl mx-auto"><div id="my-messages-container" class="space-y-3"></div></div>
+
+                <!-- VIEW CARI WARGA -->
+                <div id="view-interaksi" class="app-view hidden max-w-3xl mx-auto">
+                    <div class="flex gap-2"><input type="text" id="search-user-input" placeholder="Cari username..." class="flex-1 border px-4 py-3 rounded-xl"><button onclick="searchUser()" class="bg-emerald-600 text-white px-6 rounded-xl font-bold">Cari</button></div>
+                    <div id="search-user-result" class="mt-4 space-y-2"></div>
+                </div>
+
+                <!-- VIEW PROFIL ANDA (POSTINGAN PRIBADI) -->
+                <div id="view-profil" class="app-view hidden max-w-2xl mx-auto">
+                    <div class="bg-white dark:bg-zinc-900 p-8 rounded-3xl shadow border text-center">
+                        <img id="my-profile-img" src="" class="mx-auto w-24 h-24 rounded-full object-cover shadow-md mb-2">
+                        <h2 id="my-profile-name" class="text-xl font-bold mt-2">Nama</h2>
+                        <p id="my-profile-username" class="text-emerald-600 text-sm">@username</p>
+                        
+                        <div class="mt-6 pt-6 border-t text-left">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="font-bold text-lg">Postingan Pribadi</h3>
+                                <button onclick="openAddPostModal()" class="bg-emerald-100 text-emerald-700 px-4 py-2 rounded-xl text-xs font-bold">+ Buat Post</button>
+                            </div>
+                            <div id="my-personal-posts" class="space-y-4"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- VIEW PROFIL ORANG LAIN -->
+                <div id="view-user-profile" class="app-view hidden max-w-2xl mx-auto">
+                    <button onclick="goBackFromUserProfile()" class="mb-4 bg-gray-100 dark:bg-zinc-800 px-4 py-2 rounded-xl text-xs font-bold">← Kembali</button>
+                    <div class="bg-white dark:bg-zinc-900 p-8 rounded-3xl shadow border text-center">
+                        <img id="other-profile-img" src="" class="mx-auto w-24 h-24 rounded-full object-cover shadow-md mb-2">
+                        <h2 id="other-profile-name" class="text-xl font-bold mt-2">Nama</h2>
+                        <p id="other-profile-username" class="text-emerald-600 text-sm">@username</p>
+                        <div id="other-chat-btn-container"></div>
+
+                        <div class="mt-6 pt-6 border-t text-left">
+                            <h3 class="font-bold text-lg mb-4">Postingan Warga</h3>
+                            <div id="other-personal-posts" class="space-y-4"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- VIEW ADMIN MODERASI -->
+                <div id="view-admin-mod" class="app-view hidden max-w-3xl mx-auto">
+                    <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl shadow border text-left">
+                        <h3 class="font-bold text-lg mb-4">Moderasi Akun Warga</h3>
+                        <div id="admin-user-list-container"></div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <!-- MODAL CHAT (DENGAN SISIPAN DOKUMEN/FOTO/VIDEO) -->
+    <div id="chat-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[90] p-4">
+        <div class="bg-white dark:bg-zinc-900 rounded-3xl w-full max-w-lg shadow-2xl flex flex-col h-[550px] overflow-hidden">
+            <div class="bg-emerald-900 text-white p-4 flex justify-between items-center">
+                <div class="flex items-center gap-3"><img id="chat-partner-img" class="w-10 h-10 rounded-full object-cover"><h3 id="chat-partner-name" class="font-bold">Nama</h3></div>
+                <button onclick="closeChatModal()" class="text-xl font-bold">✕</button>
+            </div>
+            <div id="chat-messages-container" class="flex-1 p-4 overflow-y-auto space-y-3"></div>
+            <form onsubmit="sendChatMessage(event)" class="p-3 border-t dark:border-zinc-800 flex gap-2 items-center">
+                <label class="cursor-pointer bg-gray-100 dark:bg-zinc-800 p-2.5 rounded-xl text-lg">📎<input type="file" id="chat-input-file" accept="image/*,video/*,.pdf,.doc,.docx,.txt" class="hidden"></label>
+                <input type="text" id="chat-input-text" placeholder="Tulis pesan..." class="flex-1 border dark:bg-zinc-800 px-4 py-2.5 rounded-xl text-sm">
+                <button type="submit" id="btn-send-chat" class="bg-emerald-600 text-white px-5 py-2.5 rounded-xl font-bold text-sm">Kirim</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- MODAL STATUS VIEWER -->
+    <div id="status-view-modal" class="hidden fixed inset-0 bg-black z-[100] flex flex-col text-white">
+        <div class="p-4 flex items-center justify-between border-b border-gray-800">
+            <div class="flex items-center gap-3"><img id="status-viewer-img" class="w-10 h-10 rounded-full object-cover"><span id="status-viewer-name" class="font-bold"></span></div>
+            <button onclick="document.getElementById('status-view-modal').classList.add('hidden')" class="text-2xl font-bold">✕</button>
+        </div>
+        <div class="flex-1 flex flex-col items-center justify-center p-4">
+            <div id="status-viewer-media" class="w-full max-w-md mb-4 text-center"></div>
+            <p id="status-viewer-text" class="text-lg font-bold text-center max-w-md"></p>
+        </div>
+    </div>
+
+    <!-- MODAL TAMBAH STATUS -->
+    <div id="add-status-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[110] p-4">
+        <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl w-full max-w-sm text-center relative">
+            <h3 class="font-bold text-lg mb-4">Buat Status 24 Jam</h3>
+            <form onsubmit="submitStatus(event)">
+                <input type="file" id="status-input-file" accept="image/*,video/*" class="w-full mb-3 border p-2 rounded-xl text-xs">
+                <textarea id="status-input-text" placeholder="Tulis keterangan status..." class="w-full border dark:bg-zinc-800 p-3 rounded-xl mb-3 h-20 resize-none text-sm"></textarea>
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl text-sm">Kirim Status</button>
+                <button type="button" onclick="document.getElementById('add-status-modal').classList.add('hidden')" class="w-full mt-2 text-gray-500 font-bold text-xs py-2">Batal</button>
+            </form>
+            <div id="status-loading" class="hidden absolute inset-0 bg-white/80 dark:bg-zinc-900/80 flex items-center justify-center font-bold text-emerald-600 rounded-3xl">Mengunggah...</div>
+        </div>
+    </div>
+
+    <!-- MODAL TAMBAH POSTINGAN PRIBADI -->
+    <div id="add-post-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[110] p-4">
+        <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl w-full max-w-md text-center relative">
+            <h3 class="font-bold text-lg mb-4">Buat Postingan Baru</h3>
+            <form onsubmit="submitPersonalPost(event)">
+                <textarea id="post-input-konten" required placeholder="Apa yang ingin Anda bagikan?" class="w-full border dark:bg-zinc-800 p-3 rounded-xl mb-3 h-24 resize-none text-sm"></textarea>
+                <input type="file" id="post-input-file" accept="image/*,video/*" class="w-full mb-4 border p-2 rounded-xl text-xs">
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl text-sm">Posting Sekarang</button>
+                <button type="button" onclick="closeAddPostModal()" class="w-full mt-2 text-gray-500 font-bold text-xs py-2">Batal</button>
+            </form>
+            <div id="post-loading" class="hidden absolute inset-0 bg-white/80 dark:bg-zinc-900/80 flex items-center justify-center font-bold text-emerald-600 rounded-3xl">Mengunggah...</div>
+        </div>
+    </div>
+
+</body>
+</html>
