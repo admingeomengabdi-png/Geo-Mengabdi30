@@ -1,0 +1,2468 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Geo Mengabdi - GeoCare Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-app.js";
+        import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, deleteDoc, doc, updateDoc, setDoc, getDoc, getDocs, onSnapshot, arrayUnion, arrayRemove, query, orderBy, where } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDZDZjIZsrtAkjukNhXaClUoPrl0cVyvW8",
+            authDomain: "geo-mengabdi.firebaseapp.com",
+            projectId: "geo-mengabdi",
+            storageBucket: "geo-mengabdi.appspot.com",
+            messagingSenderId: "713746496745",
+            appId: "1:713746496745:web:d8723beee8c70d56fac478",
+            measurementId: "G-N4CF0Z8N9D"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const provider = new GoogleAuthProvider();
+
+        window.currentUser = null;
+        window.isAdmin = false;
+        
+        let mapInstance = null; 
+        let trackChartInstance = null;
+        let itemToDelete = null; 
+        let currentChatPartnerUid = null;
+        let chatUnsubscribe = null;
+        let previousViewBeforeUser = 'view-beranda';
+        let personalPostToDeleteId = null;
+        let statusIntervalTimer = null;
+        let selectedMusicTrack = null;
+        let previewAudioElement = null;
+        
+        let selectedTaggedFriends = [];
+        let allRegisteredUsers = [];
+
+        const loginScreen = document.getElementById('login-screen');
+        const splashScreen = document.getElementById('splash-screen');
+        const mainApp = document.getElementById('main-app');
+        const profileModal = document.getElementById('profile-modal');
+        const usernameModal = document.getElementById('username-modal');
+        const btnLogin = document.getElementById('btn-login');
+
+        btnLogin.addEventListener('click', () => {
+            signInWithPopup(auth, provider).then(() => {
+                showLoginSuccessAnimationModal();
+            }).catch((error) => {
+                showNotificationModal("Gagal Login", error.message, false);
+            });
+        });
+
+        window.logout = () => {
+            signOut(auth).then(() => {
+                localStorage.removeItem('saved_user_uid');
+                location.reload();
+            });
+        };
+
+        onAuthStateChanged(auth, async (user) => {
+            try {
+                if (user) {
+                    window.currentUser = user;
+                    window.isAdmin = (user.email === 'admingeomengabdi@gmail.com');
+                    
+                    const userDocRef = doc(db, "users", user.uid);
+                    const userSnap = await getDoc(userDocRef);
+
+                    if (userSnap.exists()) {
+                        const uData = userSnap.data();
+                        if (uData.statusBlokir && uData.statusBlokir !== 'aktif') {
+                            checkBannedStatus(uData);
+                            return;
+                        }
+                    }
+
+                    loginScreen.classList.add('hidden');
+                    localStorage.setItem('saved_user_uid', user.uid);
+                    
+                    fetchAllUsersForTagging();
+                    loadHomeFeedAndStories();
+
+                    if (window.isAdmin) {
+                        showSplashThenMainApp();
+                    } else {
+                        if (!userSnap.exists() || !userSnap.data().username) {
+                            usernameModal.classList.remove('hidden');
+                        } else if (!localStorage.getItem('profileComplete_' + user.uid)) {
+                            profileModal.classList.remove('hidden');
+                            document.getElementById('prof-email').value = user.email;
+                        } else {
+                            showSplashThenMainApp();
+                        }
+                    }
+                } else {
+                    const savedUid = localStorage.getItem('saved_user_uid');
+                    if (!savedUid) {
+                        loginScreen.classList.remove('hidden');
+                        mainApp.classList.add('hidden');
+                        splashScreen.classList.add('hidden');
+                    }
+                }
+            } catch (err) {
+                console.error("Auth state error:", err);
+            }
+        });
+
+        // POP UP ANIMASI KETIKA BERHASIL LOGIN
+        function showLoginSuccessAnimationModal() {
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `
+                <div class="bg-white dark:bg-zinc-900 rounded-3xl w-full max-w-sm shadow-2xl p-8 text-center transform transition-all animate-scale-up border border-emerald-100 dark:border-zinc-800">
+                    <div class="mb-4">
+                        <div class="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center text-4xl mx-auto shadow-inner animate-bounce">🎉</div>
+                    </div>
+                    <h3 class="text-2xl font-extrabold text-gray-900 dark:text-white mb-2">Login Berhasil!</h3>
+                    <p class="text-gray-600 dark:text-gray-300 text-sm mb-6">Selamat datang kembali di ekosistem GeoCare.</p>
+                    <button onclick="closeLoginSuccessModal()" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3.5 rounded-xl shadow-lg transition">Lanjutkan</button>
+                </div>
+            `;
+            modal.classList.remove('hidden');
+        }
+
+        window.closeLoginSuccessModal = () => {
+            document.getElementById('notification-modal').classList.add('hidden');
+        };
+
+        // TRANSISI SPLASH SCREEN MENGGUNAKAN LOGO & TOMBOL START
+        function showSplashThenMainApp() {
+            loginScreen.classList.add('hidden');
+            splashScreen.classList.remove('hidden');
+        }
+
+        window.startAppFromSplash = () => {
+            splashScreen.classList.add('hidden');
+            showMainApp();
+        };
+
+        async function fetchAllUsersForTagging() {
+            try {
+                const snap = await getDocs(collection(db, "users"));
+                allRegisteredUsers = [];
+                snap.forEach(d => {
+                    const data = d.data();
+                    if (window.currentUser && data.uid !== window.currentUser.uid && data.email !== 'admingeomengabdi@gmail.com') {
+                        allRegisteredUsers.push(data);
+                    }
+                });
+            } catch(e) {
+                console.error("Gagal memuat pengguna untuk tag:", e);
+            }
+        }
+
+        function checkBannedStatus(uData) {
+            loginScreen.classList.add('hidden');
+            mainApp.classList.add('hidden');
+            splashScreen.classList.add('hidden');
+            const bannedModal = document.getElementById('banned-modal');
+            const bannedText = document.getElementById('banned-reason-text');
+            
+            if (uData.statusBlokir === 'permanen') {
+                bannedText.innerText = "Akun Anda telah diblokir secara PERMANEN oleh Administrator.";
+            } else if (uData.statusBlokir === 'sementara') {
+                const tanggalBuka = new Date(uData.tanggalBukaBlokir);
+                bannedText.innerText = `Akun Anda diblokir sementara hingga ${tanggalBuka.toLocaleDateString('id-ID')}.`;
+            }
+            bannedModal.classList.remove('hidden');
+        }
+
+        window.saveUsername = async (e) => {
+            e.preventDefault();
+            const usernameInput = document.getElementById('input-username').value.trim().toLowerCase();
+            const warningEl = document.getElementById('username-warning');
+            if (!usernameInput || !window.currentUser) return;
+
+            const q = query(collection(db, "users"), where("username", "==", usernameInput));
+            const querySnapshot = await getDocs(q);
+            let isDuplicate = false;
+            querySnapshot.forEach((doc) => { if (doc.id !== window.currentUser.uid) isDuplicate = true; });
+
+            if (isDuplicate) {
+                warningEl.classList.remove('hidden');
+                return;
+            } else {
+                warningEl.classList.add('hidden');
+            }
+
+            try {
+                await setDoc(doc(db, "users", window.currentUser.uid), {
+                    uid: window.currentUser.uid,
+                    email: window.currentUser.email,
+                    nama: window.currentUser.displayName || "Warga",
+                    username: usernameInput,
+                    biodata: "Warga pemerhati lingkungan GeoCare.",
+                    fotoProfil: window.currentUser.photoURL || "https://iili.io/J2r6Wba.png",
+                    followers: [],
+                    following: [],
+                    followRequests: [],
+                    isPrivate: false,
+                    statusBlokir: 'aktif',
+                    statusAktifHingga: 0
+                }, { merge: true });
+
+                usernameModal.classList.add('hidden');
+                profileModal.classList.remove('hidden');
+                document.getElementById('prof-email').value = window.currentUser.email;
+            } catch (err) {
+                alert("Gagal menyimpan username: " + err.message);
+            }
+        };
+
+        // VALIDASI KETAT BIODATA (MENCEGAH PENGISIAN SEMBARANGAN)
+        window.saveProfile = async (e) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            
+            const telepon = document.getElementById('prof-telepon').value.trim();
+            const alamat = document.getElementById('prof-alamat').value.trim();
+            const ttl = document.getElementById('prof-ttl').value.trim();
+
+            // Validasi Nomor Telepon (Harus angka dan minimal 10 digit)
+            const phoneRegex = /^[0-9]{10,15}$/;
+            if (!phoneRegex.test(telepon)) {
+                showNotificationModal("Validasi Gagal", "Nomor telepon harus berupa angka yang valid (10-15 digit tanpa huruf atau spasi berlebih).", false);
+                return;
+            }
+
+            // Validasi Alamat (Minimal 10 karakter agar jelas)
+            if (alamat.length < 10) {
+                showNotificationModal("Validasi Gagal", "Alamat terlalu singkat. Mohon masukkan alamat lengkap minimal 10 karakter.", false);
+                return;
+            }
+
+            // Validasi Tempat Tanggal Lahir (Format minimal mengandung koma atau kota & tanggal)
+            if (ttl.length < 5 || !ttl.includes(',')) {
+                showNotificationModal("Validasi Gagal", "Format Tempat, Tanggal Lahir tidak valid. Contoh: Balikpapan, 12 Januari 2004", false);
+                return;
+            }
+
+            try {
+                await updateDoc(doc(db, "users", window.currentUser.uid), { telepon, alamat, ttl, statusBlokir: 'aktif' });
+                localStorage.setItem('profileComplete_' + window.currentUser.uid, 'true');
+                profileModal.classList.add('hidden');
+                showSplashThenMainApp();
+            } catch(err) {
+                alert("Gagal menyimpan profil: " + err.message);
+            }
+        };
+
+        function showMainApp() {
+            mainApp.classList.remove('hidden');
+            const nameDisplay = document.getElementById('user-name-display');
+            if(nameDisplay) nameDisplay.innerText = window.isAdmin ? "Admin Geo Mengabdi" : window.currentUser?.displayName || "Warga";
+            
+            document.querySelectorAll('.admin-only').forEach(el => {
+                el.style.display = window.isAdmin ? 'inline-block' : 'none';
+            });
+
+            loadInformasi();
+            loadMap();
+            loadEdukasi();
+            loadTrackRecordData();
+            loadMyProfileData();
+            loadNotificationsAndMessages();
+            loadHomeFeedAndStories();
+            if (window.isAdmin) loadAdminUserList();
+            
+            switchView('view-beranda', 'Beranda Utama');
+        }
+
+        window.openCustomerServiceAdmin = async () => {
+            if (!window.currentUser) return;
+            const q = query(collection(db, "users"), where("email", "==", "admingeomengabdi@gmail.com"));
+            const snap = await getDocs(q);
+            let adminUid = "";
+            snap.forEach(d => { adminUid = d.id; });
+
+            if (!adminUid) {
+                showNotificationModal("Info", "Akun Customer Service Admin belum terdaftar di database.", false);
+                return;
+            }
+            openChatRoom(adminUid, "Customer Service Admin", "https://iili.io/J2r6Wba.png");
+        };
+
+        function loadHomeFeedAndStories() {
+            if (!window.currentUser) return;
+            
+            onSnapshot(collection(db, "users"), (snapshot) => {
+                const storiesContainer = document.getElementById('home-stories-container');
+                if (!storiesContainer) return;
+                
+                let storiesHtml = `
+                    <div onclick="openStatusViewer('${window.currentUser.uid}', true)" class="flex flex-col items-center cursor-pointer flex-shrink-0">
+                        <div class="w-16 h-16 rounded-full p-0.5 border-2 border-dashed border-emerald-500 flex items-center justify-center bg-gray-50 dark:bg-zinc-800 relative">
+                            <img src="${window.currentUser.photoURL || 'https://iili.io/J2r6Wba.png'}" class="w-full h-full rounded-full object-cover">
+                            <div class="absolute bottom-0 right-0 bg-emerald-600 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs font-bold">+</div>
+                        </div>
+                        <span class="text-xs mt-1 truncate w-16 text-center">Cerita Anda</span>
+                    </div>
+                `;
+
+                snapshot.forEach(docSnap => {
+                    const uData = docSnap.data();
+                    if (uData.uid !== window.currentUser.uid && uData.email !== 'admingeomengabdi@gmail.com') {
+                        const now = Date.now();
+                        const hasActiveStatus = uData.statusAktifHingga && uData.statusAktifHingga > now;
+                        const ringClass = hasActiveStatus ? "ring-4 ring-pink-500 ring-offset-2" : "border border-gray-300";
+
+                        storiesHtml += `
+                            <div onclick="openStatusViewer('${uData.uid}', false)" class="flex flex-col items-center cursor-pointer flex-shrink-0">
+                                <div class="w-16 h-16 rounded-full p-0.5 ${ringClass} bg-gray-50 dark:bg-zinc-800">
+                                    <img src="${uData.fotoProfil || 'https://iili.io/J2r6Wba.png'}" class="w-full h-full rounded-full object-cover">
+                                </div>
+                                <span class="text-xs mt-1 truncate w-16 text-center">${uData.nama}</span>
+                            </div>
+                        `;
+                    }
+                });
+                storiesContainer.innerHTML = storiesHtml;
+            });
+
+            onSnapshot(collection(db, "postingan_pribadi"), async (snapshot) => {
+                const feedContainer = document.getElementById('home-feed-container');
+                if (!feedContainer) return;
+                
+                let posts = [];
+                snapshot.forEach(d => posts.push({ id: d.id, ...d.data() }));
+                posts.sort((a,b) => b.timestamp - a.timestamp);
+
+                if (posts.length === 0) {
+                    feedContainer.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada postingan dari warga.</p>`;
+                    return;
+                }
+
+                let feedHtml = "";
+                for (const post of posts) {
+                    const uSnap = await getDoc(doc(db, "users", post.uid));
+                    const uData = uSnap.exists() ? uSnap.data() : { nama: "Warga", fotoProfil: "https://iili.io/J2r6Wba.png", username: "warga" };
+
+                    const isLiked = window.currentUser && post.likes.includes(window.currentUser.uid);
+                    let mediaHtml = "";
+                    if(post.mediaUrl) {
+                        if(post.mediaType === 'video') {
+                            mediaHtml = `<video src="${post.mediaUrl}" controls class="w-full h-auto max-h-96 rounded-xl mt-3 object-cover bg-black"></video>`;
+                        } else {
+                            mediaHtml = `<img src="${post.mediaUrl}" class="w-full h-auto max-h-96 rounded-xl mt-3 object-cover">`;
+                        }
+                    }
+
+                    let musicHtml = "";
+                    if (post.music) {
+                        const startTime = post.music.startTime || 0;
+                        const audioPlayerId = `audio-player-${post.id}`;
+                        musicHtml = `
+                            <div class="flex items-center justify-between bg-emerald-50/80 dark:bg-zinc-800 p-2.5 rounded-2xl mt-3 border border-emerald-100 dark:border-zinc-700">
+                                <div class="flex items-center gap-2.5 overflow-hidden">
+                                    <img src="${post.music.artworkUrl}" class="w-9 h-9 rounded-xl object-cover">
+                                    <div class="truncate text-left"><p class="text-xs font-bold text-emerald-900 dark:text-emerald-300 truncate">🎵 ${post.music.trackName} <span class="text-[9px] font-normal text-gray-400">(Mulai ${startTime}s)</span></p><p class="text-[10px] text-gray-500 truncate">${post.music.artistName}</p></div>
+                                </div>
+                                <audio id="${audioPlayerId}" src="${post.music.previewUrl}" onloadedmetadata="this.currentTime = ${startTime}" controls class="h-8 max-w-[140px]"></audio>
+                            </div>
+                        `;
+                    }
+
+                    let taggedHtml = "";
+                    if (post.taggedFriendsData && post.taggedFriendsData.length > 0) {
+                        taggedHtml = `
+                            <div class="flex flex-wrap gap-1 mt-2 text-xs">
+                                <span class="text-gray-500 font-semibold">Bersama:</span>
+                                ${post.taggedFriendsData.map(tf => `<span class="text-emerald-600 dark:text-emerald-400 font-bold cursor-pointer hover:underline" onclick="openUserProfile('${tf.uid}')">@${tf.username}</span>`).join(', ')}
+                            </div>
+                        `;
+                    }
+
+                    let collabBadge = post.isCollaborative ? `<span class="bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 text-[10px] px-2 py-0.5 rounded-full font-bold ml-2">🤝 Kolaborasi</span>` : "";
+
+                    let repostBtn = "";
+                    if (window.currentUser && post.uid !== window.currentUser.uid && post.taggedFriends && post.taggedFriends.includes(window.currentUser.uid)) {
+                        repostBtn = `<button onclick="repostPersonalPost('${post.id}')" class="text-purple-600 dark:text-purple-400 font-bold text-xs flex items-center gap-1 hover:underline">🔄 Repost</button>`;
+                    }
+
+                    let commentsHtml = (post.komentar || []).map(k => `
+                        <div class="bg-gray-50 dark:bg-zinc-800 p-2 rounded-xl text-xs mb-1 text-left">
+                            <span class="font-bold text-emerald-800 dark:text-emerald-300">${k.nama}</span>
+                            <p class="text-gray-700 dark:text-gray-300">${k.teks}</p>
+                        </div>
+                    `).join('');
+
+                    feedHtml += `
+                        <div class="bg-white dark:bg-zinc-900 border dark:border-zinc-800 rounded-3xl mb-6 shadow-sm overflow-hidden text-left">
+                            <div class="flex items-center justify-between p-4 pb-3">
+                                <div class="flex items-center gap-3 cursor-pointer" onclick="openUserProfile('${post.uid}')">
+                                    <img src="${uData.fotoProfil}" class="w-10 h-10 rounded-full object-cover ${getProfilePicRingClass(uData)}">
+                                    <div>
+                                        <div class="flex items-center"><h4 class="font-bold text-sm">${uData.nama}</h4>${collabBadge}</div>
+                                        <span class="text-[10px] text-gray-500">@${uData.username || 'warga'} • ${new Date(post.timestamp).toLocaleDateString('id-ID')}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="px-4 pb-2">
+                                <p class="text-sm text-gray-800 dark:text-gray-200">${post.konten}</p>
+                            </div>
+
+                            <div class="px-4">
+                                ${mediaHtml}
+                                ${musicHtml}
+                                ${taggedHtml}
+                            </div>
+
+                            <div class="p-4 pt-3">
+                                <div class="flex items-center justify-between text-sm pt-2 border-t dark:border-zinc-800">
+                                    <div class="flex gap-4 items-center">
+                                        <button onclick="togglePersonalPostLike('${post.id}', ${isLiked})" class="${isLiked ? 'text-red-500' : 'text-gray-500'} font-bold flex items-center gap-1">❤️ ${post.likes.length}</button>
+                                        <button onclick="document.getElementById('home-comment-box-${post.id}').classList.toggle('hidden')" class="text-gray-500 font-bold flex items-center gap-1">💬 ${(post.komentar || []).length}</button>
+                                        ${repostBtn}
+                                    </div>
+                                    <button onclick="sharePost('${escapeHtml(post.konten)}')" class="text-gray-500 font-semibold text-xs">🔗 Bagikan</button>
+                                </div>
+
+                                <div id="home-comment-box-${post.id}" class="hidden mt-3 pt-3 border-t border-dashed dark:border-zinc-800">
+                                    <div class="max-h-32 overflow-y-auto mb-2 space-y-1">${commentsHtml || '<p class="text-xs text-gray-400 italic">Belum ada komentar.</p>'}</div>
+                                    <form onsubmit="submitPersonalPostComment(event, '${post.id}')" class="flex gap-2">
+                                        <input type="text" id="post-comment-input-${post.id}" placeholder="Tulis komentar..." class="flex-1 bg-gray-50 dark:bg-zinc-800 border text-xs px-3 py-2 rounded-xl outline-none">
+                                        <button type="submit" class="bg-emerald-600 text-white text-xs font-bold px-3 py-2 rounded-xl">Kirim</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                feedContainer.innerHTML = feedHtml;
+            });
+        }
+
+        window.openStatusViewer = async (uid, isMyProfile = false) => {
+            const snap = await getDoc(doc(db, "users", uid));
+            if(!snap.exists()) return;
+            const uData = snap.data();
+            const now = Date.now();
+
+            const q = query(collection(db, "status"), where("uid", "==", uid));
+            const statusSnaps = await getDocs(q);
+            let activeStatuses = [];
+            statusSnaps.forEach(s => {
+                const sData = s.data();
+                if(sData.timestamp > now - (24 * 60 * 60 * 1000)) {
+                    activeStatuses.push({ id: s.id, ...sData });
+                }
+            });
+            
+            if (activeStatuses.length > 0) {
+                activeStatuses.sort((a,b) => a.timestamp - b.timestamp);
+                playStatusSequence(uData, activeStatuses, 0);
+                return;
+            }
+
+            if(isMyProfile) document.getElementById('add-status-modal').classList.remove('hidden');
+            else showNotificationModal("Info", "Pengguna ini belum mengunggah status aktif.", false);
+        };
+
+        function playStatusSequence(uData, statuses, currentIndex) {
+            if (statusIntervalTimer) clearInterval(statusIntervalTimer);
+            if (currentIndex >= statuses.length) {
+                document.getElementById('status-view-modal').classList.add('hidden');
+                return;
+            }
+
+            const sData = statuses[currentIndex];
+            document.getElementById('status-viewer-img').src = uData.fotoProfil;
+            document.getElementById('status-viewer-name').innerText = uData.nama;
+            
+            const mediaContainer = document.getElementById('status-viewer-media');
+            mediaContainer.innerHTML = "";
+            if(sData.mediaUrl) {
+                if(sData.mediaType === 'video') {
+                    mediaContainer.innerHTML = `<video src="${sData.mediaUrl}" autoplay class="w-full h-auto max-h-[60vh] rounded-xl object-contain bg-black"></video>`;
+                } else {
+                    mediaContainer.innerHTML = `<img src="${sData.mediaUrl}" class="w-full h-auto max-h-[60vh] rounded-xl object-contain bg-black">`;
+                }
+            }
+            document.getElementById('status-viewer-text').innerText = sData.text || "";
+
+            const deleteActionDiv = document.getElementById('status-viewer-delete-action');
+            if (window.currentUser && uData.uid === window.currentUser.uid) {
+                deleteActionDiv.innerHTML = `<button onclick="deleteSingleStatus('${sData.id}')" class="bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3 py-1.5 rounded-xl transition shadow">🗑️ Hapus Status Ini</button>`;
+            } else {
+                deleteActionDiv.innerHTML = "";
+            }
+
+            const barEl = document.getElementById('status-progress-bar');
+            barEl.style.transition = 'none';
+            barEl.style.width = '0%';
+            setTimeout(() => {
+                barEl.style.transition = 'width 10s linear';
+                barEl.style.width = '100%';
+            }, 50);
+
+            document.getElementById('status-view-modal').classList.remove('hidden');
+
+            statusIntervalTimer = setTimeout(() => {
+                playStatusSequence(uData, statuses, currentIndex + 1);
+            }, 10000);
+        }
+
+        window.closeStatusViewerModal = () => {
+            if (statusIntervalTimer) clearInterval(statusIntervalTimer);
+            document.getElementById('status-view-modal').classList.add('hidden');
+        };
+
+        window.deleteSingleStatus = async (statusId) => {
+            if (!window.currentUser) return;
+            if (statusIntervalTimer) clearInterval(statusIntervalTimer);
+            try {
+                await deleteDoc(doc(db, "status", statusId));
+                
+                const q = query(collection(db, "status"), where("uid", "==", window.currentUser.uid));
+                const snap = await getDocs(q);
+                let remaining = 0;
+                const now = Date.now();
+                snap.forEach(s => { if(s.data().timestamp > now - (24*60*60*1000)) remaining++; });
+
+                if (remaining === 0) {
+                    await updateDoc(doc(db, "users", window.currentUser.uid), { statusAktifHingga: 0 });
+                }
+
+                document.getElementById('status-view-modal').classList.add('hidden');
+                showNotificationModal("Berhasil", "Status berhasil dihapus.", true);
+            } catch (err) {
+                alert("Gagal menghapus status: " + err.message);
+            }
+        };
+
+        window.submitStatus = async (e) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            const text = document.getElementById('status-input-text').value;
+            const fileInput = document.getElementById('status-input-file');
+            const file = fileInput.files[0];
+            if(!text && !file) return;
+
+            document.getElementById('status-loading').classList.remove('hidden');
+            try {
+                let mediaUrl = "";
+                let mediaType = "image";
+                if (file) {
+                    if (file.type.startsWith('video/')) {
+                        if (file.size > 700 * 1024) throw new Error("Ukuran video maksimal 700 KB.");
+                        mediaType = "video";
+                        mediaUrl = await fileToBase64(file);
+                    } else {
+                        mediaUrl = await compressImage(file);
+                    }
+                }
+
+                await addDoc(collection(db, "status"), { uid: window.currentUser.uid, text, mediaUrl, mediaType, timestamp: Date.now() });
+                await updateDoc(doc(db, "users", window.currentUser.uid), { statusAktifHingga: Date.now() + (24 * 60 * 60 * 1000) });
+
+                document.getElementById('add-status-modal').classList.add('hidden');
+                document.getElementById('status-input-text').value = "";
+                fileInput.value = "";
+                showNotificationModal("Berhasil", "Status baru berhasil ditambahkan!", true);
+            } catch (err) { 
+                showNotificationModal("Gagal Mengunggah", err.message, false); 
+            } finally { 
+                document.getElementById('status-loading').classList.add('hidden'); 
+            }
+        };
+
+        function getProfilePicRingClass(userData) {
+            const now = Date.now();
+            if (userData.statusAktifHingga && userData.statusAktifHingga > now) {
+                return "ring-4 ring-offset-2 ring-pink-500 p-0.5 cursor-pointer";
+            }
+            return "cursor-pointer";
+        }
+
+        window.searchGlobalMusic = async () => {
+            const queryVal = document.getElementById('music-search-input').value.trim();
+            const resultBox = document.getElementById('music-search-results');
+            if (!queryVal) return;
+            resultBox.innerHTML = `<p class="text-xs text-gray-400 text-center py-2">Mencari musik...</p>`;
+            try {
+                const res = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(queryVal)}&entity=song&limit=5`);
+                const data = await res.json();
+                if (data.results && data.results.length > 0) {
+                    resultBox.innerHTML = data.results.map(track => `
+                        <div class="flex items-center justify-between p-2 bg-gray-50 dark:bg-zinc-800 rounded-xl mb-1 text-xs">
+                            <div class="flex items-center gap-2 overflow-hidden">
+                                <img src="${track.artworkUrl60}" class="w-8 h-8 rounded-lg object-cover">
+                                <div class="truncate"><p class="font-bold truncate">${track.trackName}</p><p class="text-[10px] text-gray-500 truncate">${track.artistName}</p></div>
+                            </div>
+                            <div class="flex gap-1">
+                                <button type="button" onclick="previewTrack('${track.previewUrl}')" class="bg-gray-200 dark:bg-zinc-700 px-2.5 py-1 rounded-lg font-bold">▶️ Preview</button>
+                                <button type="button" onclick='selectMusic("${escapeHtml(track.trackName)}", "${escapeHtml(track.artistName)}", "${track.previewUrl}", "${track.artworkUrl60}")' class="bg-emerald-600 text-white px-2.5 py-1 rounded-lg font-bold">Pilih</button>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    resultBox.innerHTML = `<p class="text-xs text-gray-400 text-center py-2">Musik tidak ditemukan.</p>`;
+                }
+            } catch (err) {
+                resultBox.innerHTML = `<p class="text-xs text-red-500 text-center py-2">Gagal memuat musik.</p>`;
+            }
+        };
+
+        window.previewTrack = (previewUrl) => {
+            if (previewAudioElement) {
+                previewAudioElement.pause();
+                previewAudioElement = null;
+            }
+            previewAudioElement = new Audio(previewUrl);
+            previewAudioElement.play();
+        };
+
+        window.selectMusic = (trackName, artistName, previewUrl, artworkUrl) => {
+            selectedMusicTrack = { trackName, artistName, previewUrl, artworkUrl, startTime: 0 };
+            if (previewAudioElement) { previewAudioElement.pause(); previewAudioElement = null; }
+            
+            renderMusicCropUI();
+            document.getElementById('music-search-results').innerHTML = "";
+            document.getElementById('music-search-input').value = "";
+        };
+
+        window.renderMusicCropUI = () => {
+            if (!selectedMusicTrack) {
+                document.getElementById('selected-music-info').innerHTML = "";
+                return;
+            }
+            document.getElementById('selected-music-info').innerHTML = `
+                <div class="bg-emerald-50 dark:bg-zinc-800 p-3 rounded-2xl border border-emerald-200 dark:border-zinc-700 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2 overflow-hidden">
+                            <img src="${selectedMusicTrack.artworkUrl}" class="w-9 h-9 rounded-lg object-cover">
+                            <div class="truncate text-left"><p class="text-xs font-bold text-emerald-900 dark:text-emerald-300 truncate">🎵 ${selectedMusicTrack.trackName}</p><p class="text-[10px] text-gray-500 truncate">${selectedMusicTrack.artistName}</p></div>
+                        </div>
+                        <button type="button" onclick="removeSelectedMusic()" class="text-red-500 text-xs font-bold px-2">✕ Hapus</button>
+                    </div>
+                    <div class="flex items-center gap-2 pt-1 border-t border-emerald-100 dark:border-zinc-700 text-xs">
+                        <span class="font-semibold text-gray-600 dark:text-gray-300 whitespace-nowrap">Mulai dari detik:</span>
+                        <input type="range" min="0" max="20" value="${selectedMusicTrack.startTime}" oninput="updateMusicCropTime(this.value)" class="flex-1 accent-emerald-600 cursor-pointer">
+                        <span id="crop-time-label" class="font-bold text-emerald-700 dark:text-emerald-400 w-10 text-right">${selectedMusicTrack.startTime} dtk</span>
+                    </div>
+                </div>
+            `;
+        };
+
+        window.updateMusicCropTime = (val) => {
+            if (selectedMusicTrack) {
+                selectedMusicTrack.startTime = parseInt(val);
+                const label = document.getElementById('crop-time-label');
+                if (label) label.innerText = val + " dtk";
+            }
+        };
+
+        window.removeSelectedMusic = () => {
+            selectedMusicTrack = null;
+            document.getElementById('selected-music-info').innerHTML = "";
+            if (previewAudioElement) { previewAudioElement.pause(); previewAudioElement = null; }
+        };
+
+        window.searchFriendForTag = () => {
+            const keyword = document.getElementById('tag-friend-search-input').value.trim().toLowerCase();
+            const resultBox = document.getElementById('tag-friend-search-results');
+            if(!keyword) { resultBox.innerHTML = ""; return; }
+
+            const filtered = allRegisteredUsers.filter(u => 
+                (u.nama && u.nama.toLowerCase().includes(keyword)) || 
+                (u.username && u.username.toLowerCase().includes(keyword))
+            );
+
+            if (filtered.length === 0) {
+                resultBox.innerHTML = `<p class="text-xs text-gray-400 p-2">Warga tidak ditemukan.</p>`;
+                return;
+            }
+
+            resultBox.innerHTML = filtered.map(u => `
+                <div class="flex items-center justify-between p-2 bg-gray-50 dark:bg-zinc-800 rounded-xl mb-1 text-xs cursor-pointer hover:bg-emerald-50" onclick='addTaggedFriend("${u.uid}", "${escapeHtml(u.nama)}", "${escapeHtml(u.username)}", "${u.fotoProfil}")'>
+                    <div class="flex items-center gap-2">
+                        <img src="${u.fotoProfil}" class="w-7 h-7 rounded-full object-cover">
+                        <div><p class="font-bold">${u.nama}</p><p class="text-[10px] text-emerald-600">@${u.username}</p></div>
+                    </div>
+                    <span class="text-emerald-600 font-bold px-2">+ Tag</span>
+                </div>
+            `).join('');
+        };
+
+        window.addTaggedFriend = (uid, nama, username, fotoProfil) => {
+            if (selectedTaggedFriends.some(f => f.uid === uid)) return;
+            selectedTaggedFriends.push({ uid, nama, username, fotoProfil });
+            document.getElementById('tag-friend-search-input').value = "";
+            document.getElementById('tag-friend-search-results').innerHTML = "";
+            renderTaggedFriendsUI();
+        };
+
+        window.removeTaggedFriend = (uid) => {
+            selectedTaggedFriends = selectedTaggedFriends.filter(f => f.uid !== uid);
+            renderTaggedFriendsUI();
+        };
+
+        window.renderTaggedFriendsUI = () => {
+            const container = document.getElementById('selected-tags-container');
+            if (!container) return;
+            if (selectedTaggedFriends.length === 0) {
+                container.innerHTML = "";
+                return;
+            }
+            container.innerHTML = `
+                <div class="flex flex-wrap gap-1.5 mt-2">
+                    ${selectedTaggedFriends.map(f => `
+                        <span class="inline-flex items-center gap-1.5 bg-emerald-100 dark:bg-zinc-800 text-emerald-800 dark:text-emerald-300 px-2.5 py-1 rounded-xl text-xs font-bold border border-emerald-200 dark:border-zinc-700">
+                            @${f.username}
+                            <button type="button" onclick="removeTaggedFriend('${f.uid}')" class="text-red-500 hover:text-red-700 ml-1">×</button>
+                        </span>
+                    `).join('')}
+                </div>
+            `;
+        };
+
+        window.repostPersonalPost = async (postId) => {
+            if (!window.currentUser) return;
+            try {
+                const postSnap = await getDoc(doc(db, "postingan_pribadi", postId));
+                if (!postSnap.exists()) return;
+                const postData = postSnap.data();
+
+                await addDoc(collection(db, "postingan_pribadi"), {
+                    uid: window.currentUser.uid,
+                    konten: `🔄 Repost kolaborasi dari @${postData.originalAuthorUsername || 'warga'}:\n\n` + postData.konten,
+                    mediaUrl: postData.mediaUrl || "",
+                    mediaType: postData.mediaType || "image",
+                    music: postData.music || null,
+                    taggedFriends: [],
+                    likes: [],
+                    komentar: [],
+                    isCollaborative: true,
+                    originalPostId: postId,
+                    timestamp: Date.now()
+                });
+
+                showNotificationModal("Berhasil", "Postingan berhasil diposting ulang ke profil Anda!", true);
+            } catch (err) {
+                alert("Gagal melakukan repost: " + err.message);
+            }
+        };
+
+        window.openAddPostModal = () => document.getElementById('add-post-modal').classList.remove('hidden');
+        window.closeAddPostModal = () => {
+            document.getElementById('add-post-modal').classList.add('hidden');
+            removeSelectedMusic();
+            selectedTaggedFriends = [];
+            renderTaggedFriendsUI();
+        };
+
+        window.submitPersonalPost = async (e) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            const konten = document.getElementById('post-input-konten').value;
+            const fileInput = document.getElementById('post-input-file');
+            const file = fileInput.files[0];
+            if (!konten && !file && !selectedMusicTrack) return;
+
+            document.getElementById('post-loading').classList.remove('hidden');
+            try {
+                let mediaUrl = "";
+                let mediaType = "image";
+                if (file) {
+                    if (file.type.startsWith('video/')) {
+                        if (file.size > 700 * 1024) throw new Error("Ukuran video maksimal 700 KB.");
+                        mediaType = "video";
+                        mediaUrl = await fileToBase64(file);
+                    } else {
+                        mediaUrl = await compressImage(file);
+                    }
+                }
+
+                const myUserSnap = await getDoc(doc(db, "users", window.currentUser.uid));
+                const myUserData = myUserSnap.exists() ? myUserSnap.data() : {};
+
+                await addDoc(collection(db, "postingan_pribadi"), {
+                    uid: window.currentUser.uid, 
+                    originalAuthorUsername: myUserData.username || "warga",
+                    konten, 
+                    mediaUrl, 
+                    mediaType,
+                    music: selectedMusicTrack || null,
+                    taggedFriends: selectedTaggedFriends.map(f => f.uid),
+                    taggedFriendsData: selectedTaggedFriends,
+                    likes: [], 
+                    komentar: [], 
+                    timestamp: Date.now()
+                });
+
+                closeAddPostModal();
+                document.getElementById('post-input-konten').value = "";
+                fileInput.value = "";
+                showNotificationModal("Berhasil", "Postingan berhasil diterbitkan!", true);
+            } catch (err) { 
+                showNotificationModal("Gagal Memposting", err.message, false); 
+            } finally { 
+                document.getElementById('post-loading').classList.add('hidden'); 
+            }
+        };
+
+        window.promptDeletePersonalPost = (postId) => {
+            personalPostToDeleteId = postId;
+            document.getElementById('delete-post-confirm-modal').classList.remove('hidden');
+        };
+
+        window.closeDeletePostConfirmModal = () => {
+            personalPostToDeleteId = null;
+            document.getElementById('delete-post-confirm-modal').classList.add('hidden');
+        };
+
+        window.executeDeletePersonalPost = async () => {
+            if (!personalPostToDeleteId) return;
+            const postId = personalPostToDeleteId;
+            closeDeletePostConfirmModal();
+            try {
+                await deleteDoc(doc(db, "postingan_pribadi", postId));
+                showNotificationModal("Berhasil", "Postingan berhasil dihapus.", true);
+            } catch (err) {
+                alert("Gagal menghapus postingan: " + err.message);
+            }
+        };
+
+        function loadPersonalPosts(targetUid, containerId) {
+            const q = query(collection(db, "postingan_pribadi"), where("uid", "==", targetUid));
+            onSnapshot(q, async (snapshot) => {
+                const container = document.getElementById(containerId);
+                if(!container) return;
+                let posts = [];
+                snapshot.forEach(d => posts.push({ id: d.id, ...d.data() }));
+                posts.sort((a,b) => b.timestamp - a.timestamp);
+
+                const uSnap = await getDoc(doc(db, "users", targetUid));
+                const uData = uSnap.exists() ? uSnap.data() : { nama: "Pengguna", fotoProfil: "" };
+
+                if (posts.length === 0) {
+                    container.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada postingan.</p>`;
+                    return;
+                }
+
+                container.innerHTML = posts.map(post => {
+                    const isLiked = window.currentUser && post.likes.includes(window.currentUser.uid);
+                    let mediaHtml = "";
+                    if(post.mediaUrl) {
+                        if(post.mediaType === 'video') {
+                            mediaHtml = `<video src="${post.mediaUrl}" controls class="w-full h-auto max-h-80 rounded-xl mt-3 object-cover bg-black"></video>`;
+                        } else {
+                            mediaHtml = `<img src="${post.mediaUrl}" class="w-full h-auto max-h-80 rounded-xl mt-3 object-cover">`;
+                        }
+                    }
+
+                    let musicHtml = "";
+                    if (post.music) {
+                        const startTime = post.music.startTime || 0;
+                        const audioPlayerId = `audio-player-${post.id}`;
+                        musicHtml = `
+                            <div class="flex items-center justify-between bg-emerald-50/80 dark:bg-zinc-800 p-2.5 rounded-2xl mt-3 border border-emerald-100 dark:border-zinc-700">
+                                <div class="flex items-center gap-2.5 overflow-hidden">
+                                    <img src="${post.music.artworkUrl}" class="w-9 h-9 rounded-xl object-cover">
+                                    <div class="truncate text-left"><p class="text-xs font-bold text-emerald-900 dark:text-emerald-300 truncate">🎵 ${post.music.trackName} <span class="text-[9px] font-normal text-gray-400">(Mulai ${startTime}s)</span></p><p class="text-[10px] text-gray-500 truncate">${post.music.artistName}</p></div>
+                                </div>
+                                <audio id="${audioPlayerId}" src="${post.music.previewUrl}" onloadedmetadata="this.currentTime = ${startTime}" controls class="h-8 max-w-[140px]"></audio>
+                            </div>
+                        `;
+                    }
+
+                    let taggedHtml = "";
+                    if (post.taggedFriendsData && post.taggedFriendsData.length > 0) {
+                        taggedHtml = `
+                            <div class="flex flex-wrap gap-1 mt-2 text-xs">
+                                <span class="text-gray-500 font-semibold">Bersama:</span>
+                                ${post.taggedFriendsData.map(tf => `<span class="text-emerald-600 dark:text-emerald-400 font-bold cursor-pointer hover:underline" onclick="openUserProfile('${tf.uid}')">@${tf.username}</span>`).join(', ')}
+                            </div>
+                        `;
+                    }
+
+                    let collabBadge = post.isCollaborative ? `<span class="bg-purple-100 text-purple-700 dark:bg-purple-900/50 dark:text-purple-300 text-[10px] px-2 py-0.5 rounded-full font-bold ml-2">🤝 Kolaborasi</span>` : "";
+
+                    let deletePostBtn = (window.currentUser && post.uid === window.currentUser.uid) ? `
+                        <button onclick="promptDeletePersonalPost('${post.id}')" class="text-red-500 font-semibold text-xs ml-auto flex items-center gap-1 hover:text-red-700">🗑️ Hapus</button>
+                    ` : "";
+
+                    let commentsHtml = (post.komentar || []).map(k => `
+                        <div class="bg-gray-50 dark:bg-zinc-800 p-2.5 rounded-xl text-xs mb-2 text-left">
+                            <span class="font-bold text-emerald-800 dark:text-emerald-300">${k.nama}</span>
+                            <p class="text-gray-700 dark:text-gray-300 mt-0.5">${k.teks}</p>
+                        </div>
+                    `).join('');
+
+                    return `
+                        <div class="bg-white dark:bg-zinc-900 border dark:border-zinc-800 p-5 rounded-3xl mb-4 shadow-sm text-left">
+                            <div class="flex items-center gap-3 mb-3">
+                                <img src="${uData.fotoProfil}" class="w-10 h-10 rounded-full object-cover">
+                                <div>
+                                    <div class="flex items-center"><h4 class="font-bold text-sm">${uData.nama}</h4>${collabBadge}</div>
+                                    <span class="text-[10px] text-gray-500">${new Date(post.timestamp).toLocaleString('id-ID')}</span>
+                                </div>
+                                ${deletePostBtn}
+                            </div>
+                            <p class="text-sm text-gray-700 dark:text-gray-300">${post.konten}</p>
+                            ${mediaHtml}
+                            ${musicHtml}
+                            ${taggedHtml}
+                            <div class="flex items-center justify-between mt-4 pt-3 border-t dark:border-zinc-800 text-sm">
+                                <div class="flex gap-4 items-center">
+                                    <button onclick="togglePersonalPostLike('${post.id}', ${isLiked})" class="${isLiked ? 'text-red-500' : 'text-gray-500'} font-bold flex items-center gap-1">❤️ ${post.likes.length}</button>
+                                    <button onclick="document.getElementById('post-comment-box-${post.id}').classList.toggle('hidden')" class="text-gray-500 font-bold flex items-center gap-1">💬 ${(post.komentar || []).length}</button>
+                                </div>
+                                <button onclick="sharePost('${escapeHtml(post.konten)}')" class="text-gray-500 font-semibold text-xs">🔗 Bagikan</button>
+                            </div>
+                            <div id="post-comment-box-${post.id}" class="hidden mt-4 pt-3 border-t border-dashed dark:border-zinc-800">
+                                <div class="max-h-40 overflow-y-auto mb-3 space-y-1">${commentsHtml || '<p class="text-xs text-gray-400 italic">Belum ada komentar.</p>'}</div>
+                                <form onsubmit="submitPersonalPostComment(event, '${post.id}')" class="flex gap-2">
+                                    <input type="text" id="post-comment-input-${post.id}" placeholder="Tulis komentar..." class="flex-1 bg-gray-50 dark:bg-zinc-800 border text-xs px-3 py-2 rounded-xl outline-none">
+                                    <button type="submit" class="bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-xl">Kirim</button>
+                                </form>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            });
+        }
+
+        window.togglePersonalPostLike = async (postId, isCurrentlyLiked) => {
+            if (!window.currentUser) return;
+            const ref = doc(db, "postingan_pribadi", postId);
+            if(isCurrentlyLiked) await updateDoc(ref, { likes: arrayRemove(window.currentUser.uid) });
+            else await updateDoc(ref, { likes: arrayUnion(window.currentUser.uid) });
+        };
+
+        window.submitPersonalPostComment = async (e, postId) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            const inputEl = document.getElementById(`post-comment-input-${postId}`);
+            const text = inputEl.value.trim();
+            if(!text) return;
+            const ref = doc(db, "postingan_pribadi", postId);
+            const userSnap = await getDoc(doc(db, "users", window.currentUser.uid));
+            const namaUser = userSnap.exists() ? userSnap.data().nama : (window.currentUser.displayName || "Warga");
+            
+            await updateDoc(ref, {
+                komentar: arrayUnion({ nama: namaUser, teks: text, waktu: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) })
+            });
+            inputEl.value = "";
+        };
+
+        window.switchView = (viewId, title) => {
+            const activeViewEl = document.querySelector('.app-view:not(.hidden)');
+            if (activeViewEl && activeViewEl.id !== 'view-user-profile' && viewId !== 'view-user-profile') {
+                previousViewBeforeUser = activeViewEl.id;
+            }
+
+            document.querySelectorAll('.app-view').forEach(el => el.classList.add('hidden'));
+            const targetView = document.getElementById(viewId);
+            if(targetView) targetView.classList.remove('hidden');
+            
+            const pageTitle = document.getElementById('page-title');
+            if(pageTitle) pageTitle.innerText = title;
+
+            const backBtn = document.getElementById('btn-back');
+            if (backBtn) {
+                if (viewId === 'view-beranda') backBtn.classList.add('hidden');
+                else backBtn.classList.remove('hidden');
+            }
+
+            if(viewId === 'view-peta' && mapInstance) {
+                setTimeout(() => mapInstance.invalidateSize(), 100);
+            }
+            toggleSidebarMobile(false);
+        };
+
+        window.goBackFromUserProfile = () => {
+            switchView(previousViewBeforeUser, 'Beranda Utama');
+        };
+
+        window.toggleSidebarMobile = (forceState) => {
+            const sidebar = document.getElementById('sidebar-menu');
+            if (!sidebar) return;
+            if (typeof forceState === 'boolean') {
+                if (forceState) sidebar.classList.remove('-translate-x-full');
+                else sidebar.classList.add('-translate-x-full');
+            } else {
+                sidebar.classList.toggle('-translate-x-full');
+            }
+        };
+
+        window.toggleNightMode = () => {
+            const body = document.body;
+            body.classList.toggle('dark-mode');
+            const isDark = body.classList.contains('dark-mode');
+            localStorage.setItem('night_mode', isDark);
+            
+            const btnText = document.getElementById('night-mode-text');
+            if(btnText) btnText.innerText = isDark ? "☀️ Light Mode" : "🌙 Night Mode";
+        };
+
+        window.loadNightModePref = () => {
+            const isDark = localStorage.getItem('night_mode') === 'true';
+            if (isDark) {
+                document.body.classList.add('dark-mode');
+                const btnText = document.getElementById('night-mode-text');
+                if(btnText) btnText.innerText = "☀️ Light Mode";
+            }
+        };
+
+        function loadNotificationsAndMessages() {
+            if (!window.currentUser) return;
+            const notifContainer = document.getElementById('notifications-container');
+            const messagesContainer = document.getElementById('my-messages-container');
+            const notifBadge = document.getElementById('badge-notifikasi');
+            const msgBadge = document.getElementById('badge-pesan-saya');
+            if (!notifContainer || !messagesContainer) return;
+
+            onSnapshot(doc(db, "users", window.currentUser.uid), async (myDocSnap) => {
+                const myData = myDocSnap.exists() ? myDocSnap.data() : {};
+                const followRequests = myData.followRequests || [];
+
+                onSnapshot(collection(db, "informasi"), async (infoSnap) => {
+                    let itemsList = [];
+                    let chatRoomsList = [];
+                    let hasUnreadNotif = false;
+                    let hasUnreadMsg = false;
+
+                    const postsQuery = query(collection(db, "postingan_pribadi"), where("taggedFriends", "array-contains", window.currentUser.uid));
+                    const postsSnap = await getDocs(postsQuery);
+                    postsSnap.forEach(pDoc => {
+                        const pData = pDoc.data();
+                        hasUnreadNotif = true;
+                        itemsList.push({
+                            type: 'mention',
+                            title: '🏷️ Anda Ditandai di Postingan',
+                            text: `Seseorang menandai Anda dalam sebuah postingan kolaboratif.`,
+                            time: 'Baru saja',
+                            timestamp: pData.timestamp || Date.now()
+                        });
+                    });
+
+                    if (followRequests.length > 0) {
+                        hasUnreadNotif = true;
+                        for (const reqUid of followRequests) {
+                            let reqName = "Seseorang";
+                            let reqFoto = "https://iili.io/J2r6Wba.png";
+                            const reqSnap = await getDoc(doc(db, "users", reqUid));
+                            if (reqSnap.exists()) {
+                                reqName = reqSnap.data().nama;
+                                reqFoto = reqSnap.data().fotoProfil;
+                            }
+                            itemsList.push({
+                                type: 'follow_request',
+                                title: '👤 Permintaan Mengikuti',
+                                text: `${reqName} ingin mengikuti akun privat Anda.`,
+                                timestamp: Date.now() + 1000,
+                                requesterUid: reqUid,
+                                requesterFoto: reqFoto,
+                                requesterName: reqName
+                            });
+                        }
+                    }
+
+                    infoSnap.forEach((docSnap) => {
+                        const infoData = docSnap.data();
+                        hasUnreadNotif = true;
+                        itemsList.push({
+                            type: 'info',
+                            title: '📢 Pembaruan Postingan Baru',
+                            text: infoData.judul,
+                            time: infoData.tanggalFormatted || 'Baru saja',
+                            timestamp: infoData.timestamp ? infoData.timestamp.toMillis() : Date.now()
+                        });
+                    });
+
+                    const chatsSnap = await getDocs(collection(db, "chats"));
+                    for (const chatDoc of chatsSnap.docs) {
+                        const chatId = chatDoc.id;
+                        if (!window.currentUser || !chatId.includes(window.currentUser.uid)) continue;
+
+                        const messagesSnap = await getDocs(collection(db, "chats", chatId, "messages"));
+                        let lastMsgText = "Belum ada pesan";
+                        let lastMsgTime = "";
+                        let lastTimestamp = 0;
+                        let participants = new Set();
+
+                        messagesSnap.forEach((msgDoc) => {
+                            const msgData = msgDoc.data();
+                            const senderUid = msgData.senderUid;
+                            if (senderUid) participants.add(senderUid);
+
+                            const deletedFor = msgData.deletedFor || [];
+                            if (window.currentUser && !deletedFor.includes(window.currentUser.uid)) {
+                                const msgTime = msgData.timestamp?.toMillis ? msgData.timestamp.toMillis() : Date.now();
+                                if (msgTime >= lastTimestamp) {
+                                    lastTimestamp = msgTime;
+                                    lastMsgText = msgData.text || '(Mengirim Media)';
+                                    lastMsgTime = msgData.waktu || '';
+                                }
+                                if (window.currentUser && msgData.senderUid && msgData.senderUid !== window.currentUser.uid) {
+                                    hasUnreadNotif = true;
+                                    hasUnreadMsg = true;
+                                    itemsList.push({
+                                        type: 'chat',
+                                        title: '💬 Pesan Pribadi Baru',
+                                        text: msgData.text || '(Mengirim Media)',
+                                        time: msgData.waktu || 'Baru saja',
+                                        timestamp: msgTime,
+                                        partnerUid: msgData.senderUid
+                                    });
+                                }
+                            }
+                        });
+
+                        let partnerUid = null;
+                        participants.forEach(uid => { if (window.currentUser && uid !== window.currentUser.uid) partnerUid = uid; });
+                        if (!partnerUid && chatId.includes('_')) {
+                            const parts = chatId.split('_');
+                            if (parts.length >= 2 && window.currentUser) partnerUid = parts[0] === window.currentUser.uid ? parts[1] : parts[0];
+                        }
+
+                        if (partnerUid && lastTimestamp > 0) {
+                            const partnerSnap = await getDoc(doc(db, "users", partnerUid));
+                            if (partnerSnap.exists()) {
+                                const pData = partnerSnap.data();
+                                chatRoomsList.push({
+                                    uid: partnerUid,
+                                    ...pData,
+                                    lastMsgText,
+                                    lastMsgTime,
+                                    lastTimestamp
+                                });
+                            }
+                        }
+                    }
+
+                    if (notifBadge) notifBadge.classList.toggle('hidden', !hasUnreadNotif);
+                    if (msgBadge) msgBadge.classList.toggle('hidden', !hasUnreadMsg);
+
+                    itemsList.sort((a, b) => b.timestamp - a.timestamp);
+                    if (itemsList.length === 0) {
+                        notifContainer.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada notifikasi aktivitas saat ini.</p>`;
+                    } else {
+                        notifContainer.innerHTML = itemsList.map(item => {
+                            if (item.type === 'mention') {
+                                return `
+                                    <div class="bg-purple-50/70 dark:bg-zinc-800 p-4 rounded-2xl border border-purple-200 dark:border-zinc-700 flex items-start gap-3 text-left">
+                                        <span class="text-2xl">🏷️</span>
+                                        <div class="flex-1">
+                                            <h4 class="font-bold text-sm text-gray-800 dark:text-white">${item.title}</h4>
+                                            <p class="text-xs text-gray-600 dark:text-gray-300 mt-1">${item.text}</p>
+                                            <span class="text-[10px] text-purple-600 mt-2 block font-semibold">Cek profil Anda untuk melakukan repost</span>
+                                        </div>
+                                    </div>`;
+                            } else if (item.type === 'follow_request') {
+                                return `
+                                    <div class="bg-amber-50/70 dark:bg-zinc-800 p-4 rounded-2xl border border-amber-200 dark:border-zinc-700 flex items-center justify-between gap-3 text-left">
+                                        <div class="flex items-center gap-3">
+                                            <img src="${item.requesterFoto}" class="w-10 h-10 rounded-full object-cover">
+                                            <div>
+                                                <h4 class="font-bold text-sm text-gray-800 dark:text-white">${item.title}</h4>
+                                                <p class="text-xs text-gray-600 dark:text-gray-300 mt-0.5">${item.text}</p>
+                                            </div>
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <button onclick="handleFollowRequest('${item.requesterUid}', 'accept')" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-3 py-1.5 rounded-xl font-bold transition">Terima</button>
+                                            <button onclick="handleFollowRequest('${item.requesterUid}', 'reject')" class="bg-red-500 hover:bg-red-600 text-white text-xs px-3 py-1.5 rounded-xl font-bold transition">Tolak</button>
+                                        </div>
+                                    </div>`;
+                            } else if (item.type === 'info') {
+                                return `
+                                    <div class="bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl border border-gray-100 dark:border-zinc-700 flex items-start gap-3 text-left">
+                                        <span class="text-2xl">📢</span>
+                                        <div class="flex-1">
+                                            <h4 class="font-bold text-sm text-gray-800 dark:text-white">${item.title}</h4>
+                                            <p class="text-xs text-gray-600 dark:text-gray-300 mt-1">${item.text}</p>
+                                            <span class="text-[10px] text-emerald-600 mt-2 block font-semibold">${item.time}</span>
+                                        </div>
+                                    </div>`;
+                            } else if (item.type === 'chat') {
+                                return `
+                                    <div onclick="openChatFromNotification('${item.partnerUid}')" class="bg-blue-50/50 dark:bg-zinc-800 p-4 rounded-2xl border border-blue-100 dark:border-zinc-700 flex items-start gap-3 cursor-pointer hover:bg-blue-100/50 transition text-left">
+                                        <span class="text-2xl">💬</span>
+                                        <div class="flex-1">
+                                            <h4 class="font-bold text-sm text-gray-800 dark:text-white">${item.title}</h4>
+                                            <p class="text-xs text-gray-600 dark:text-gray-300 mt-1 truncate">${item.text}</p>
+                                            <span class="text-[10px] text-blue-600 mt-2 block font-semibold">${item.time} (Klik untuk balas)</span>
+                                        </div>
+                                    </div>`;
+                            }
+                        }).join('');
+                    }
+
+                    chatRoomsList.sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+                    if (chatRoomsList.length === 0) {
+                        messagesContainer.innerHTML = `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada percakapan pesan.</p>`;
+                    } else {
+                        messagesContainer.innerHTML = chatRoomsList.map(room => `
+                            <div onclick="openChatRoom('${room.uid}', '${escapeHtml(room.nama)}', '${room.fotoProfil}')" class="bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl border border-gray-100 dark:border-zinc-700 flex items-center justify-between cursor-pointer hover:bg-emerald-50/50 transition text-left">
+                                <div class="flex items-center gap-3">
+                                    <img src="${room.fotoProfil}" class="w-12 h-12 rounded-full object-cover ${getProfilePicRingClass(room)}">
+                                    <div>
+                                        <h4 class="font-bold text-sm text-gray-800 dark:text-white">${room.nama}</h4>
+                                        <p class="text-xs text-emerald-600 font-medium">@${room.username}</p>
+                                        <p class="text-xs text-gray-500 dark:text-gray-400 truncate mt-1 max-w-xs">${room.lastMsgText}</p>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <span class="text-[10px] text-gray-400 block">${room.lastMsgTime}</span>
+                                    <span class="text-xs font-bold text-emerald-700 bg-emerald-100 dark:bg-emerald-900/50 dark:text-emerald-300 px-3 py-1.5 rounded-xl inline-block mt-1">Buka Chat →</span>
+                                </div>
+                            </div>
+                        `).join('');
+                    }
+                });
+            });
+        }
+
+        window.openChatFromNotification = async (partnerUid) => {
+            const partnerSnap = await getDoc(doc(db, "users", partnerUid));
+            if (partnerSnap.exists()) {
+                const pData = partnerSnap.data();
+                openChatRoom(partnerUid, pData.nama, pData.fotoProfil);
+            }
+        };
+
+        window.handleFollowRequest = async (requesterUid, action) => {
+            if (!window.currentUser) return;
+            const myRef = doc(db, "users", window.currentUser.uid);
+            const requesterRef = doc(db, "users", requesterUid);
+
+            try {
+                if (action === 'accept') {
+                    await updateDoc(myRef, { followers: arrayUnion(requesterUid), followRequests: arrayRemove(requesterUid) });
+                    await updateDoc(requesterRef, { following: arrayUnion(window.currentUser.uid) });
+                    showNotificationModal("Berhasil", "Permintaan mengikuti diterima.", true);
+                } else if (action === 'reject') {
+                    await updateDoc(myRef, { followRequests: arrayRemove(requesterUid) });
+                    showNotificationModal("Ditolak", "Permintaan mengikuti ditolak.", false);
+                }
+            } catch (err) { alert("Gagal memproses permintaan: " + err.message); }
+        };
+
+        window.searchUser = async () => {
+            if (!window.currentUser) return;
+            const queryText = document.getElementById('search-user-input').value.trim().toLowerCase();
+            const resultContainer = document.getElementById('search-user-result');
+            if(!resultContainer) return;
+            resultContainer.innerHTML = "";
+            if (!queryText) return;
+
+            let history = JSON.parse(localStorage.getItem('search_history') || '[]');
+            if (!history.includes(queryText)) {
+                history.unshift(queryText);
+                if (history.length > 5) history.pop();
+                localStorage.setItem('search_history', JSON.stringify(history));
+            }
+            renderSearchHistory();
+
+            onSnapshot(collection(db, "users"), async (snapshot) => {
+                resultContainer.innerHTML = "";
+                let foundCount = 0;
+                snapshot.forEach((docSnap) => {
+                    const uData = docSnap.data();
+                    if (window.currentUser && uData.uid !== window.currentUser.uid && uData.email !== 'admingeomengabdi@gmail.com' && uData.username && uData.username.includes(queryText)) {
+                        foundCount++;
+                        resultContainer.innerHTML += `
+                            <div class="bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl flex items-center justify-between border border-gray-100 dark:border-zinc-700 mb-2 cursor-pointer hover:bg-emerald-50/50 transition text-left" onclick="openUserProfile('${uData.uid}')">
+                                <div class="flex items-center gap-3">
+                                    <img src="${uData.fotoProfil}" class="w-10 h-10 rounded-full object-cover ${getProfilePicRingClass(uData)}">
+                                    <div><h4 class="font-bold text-sm text-gray-800 dark:text-white">${uData.nama}</h4><p class="text-xs text-emerald-600">@${uData.username}</p></div>
+                                </div>
+                                <span class="text-xs font-bold text-emerald-700 bg-emerald-100 dark:bg-emerald-900/50 dark:text-emerald-300 px-3 py-1.5 rounded-xl">Lihat Profil →</span>
+                            </div>`;
+                    }
+                });
+                if (foundCount === 0) resultContainer.innerHTML = `<p class="text-xs text-gray-400 italic">Pengguna tidak ditemukan.</p>`;
+            });
+        };
+
+        window.renderSearchHistory = () => {
+            const historyContainer = document.getElementById('search-history-container');
+            if (!historyContainer) return;
+            const history = JSON.parse(localStorage.getItem('search_history') || '[]');
+            if (history.length === 0) { historyContainer.innerHTML = ""; return; }
+            let html = `<p class="text-[11px] font-bold text-gray-400 mb-1 text-left">Riwayat Pencarian:</p><div class="flex flex-wrap gap-1.5">`;
+            history.forEach(item => {
+                html += `<button onclick="selectHistoryItem('${item}')" class="bg-gray-100 dark:bg-zinc-800 hover:bg-emerald-100 text-gray-700 dark:text-gray-300 text-xs px-3 py-1 rounded-full transition">#${item}</button>`;
+            });
+            html += `</div>`;
+            historyContainer.innerHTML = html;
+        };
+
+        window.selectHistoryItem = (term) => {
+            document.getElementById('search-user-input').value = term;
+            searchUser();
+        };
+
+        async function renderLimitedUserList(containerId, uidsArray, listTypeTitle, targetUidForModal) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            container.innerHTML = "";
+            if (uidsArray.length === 0) {
+                container.innerHTML = `<p class="text-xs text-gray-400 italic">Tidak ada data.</p>`;
+                return;
+            }
+
+            const limitedUids = uidsArray.slice(0, 5);
+            for (const fUid of limitedUids) {
+                const fSnap = await getDoc(doc(db, "users", fUid));
+                if (fSnap.exists()) {
+                    const fData = fSnap.data();
+                    container.innerHTML += `
+                        <div class="flex items-center gap-3 p-2 bg-gray-50 dark:bg-zinc-800 rounded-xl cursor-pointer hover:bg-gray-100 transition text-left" onclick="openUserProfile('${fData.uid}')">
+                            <img src="${fData.fotoProfil}" class="w-8 h-8 rounded-full object-cover ${getProfilePicRingClass(fData)}">
+                            <div><p class="text-xs font-bold text-gray-800 dark:text-white">${fData.nama}</p><p class="text-[10px] text-emerald-600">@${fData.username}</p></div>
+                        </div>
+                    `;
+                }
+            }
+
+            if (uidsArray.length > 5) {
+                container.innerHTML += `
+                    <button onclick="openFullUserListModal('${listTypeTitle}', '${targetUidForModal}')" class="w-full mt-2 bg-emerald-50 dark:bg-zinc-800 hover:bg-emerald-100 text-emerald-700 dark:text-emerald-300 font-bold py-2 rounded-xl text-xs transition">
+                        Lainnya (${uidsArray.length - 5} lainnya) →
+                    </button>
+                `;
+            }
+        }
+
+        window.openFullUserListModal = async (title, targetUid) => {
+            const modal = document.getElementById('full-list-modal');
+            const titleEl = document.getElementById('full-list-title');
+            const containerEl = document.getElementById('full-list-container');
+            if(!modal) return;
+
+            titleEl.innerText = title;
+            containerEl.innerHTML = `<p class="text-center text-xs text-gray-400 py-4">Memuat data...</p>`;
+            modal.classList.remove('hidden');
+
+            const targetSnap = await getDoc(doc(db, "users", targetUid));
+            if (!targetSnap.exists()) return;
+            const tData = targetSnap.data();
+            const uidsArray = title.includes("Pengikut") ? (tData.followers || []) : (tData.following || []);
+
+            containerEl.innerHTML = "";
+            for (const fUid of uidsArray) {
+                const fSnap = await getDoc(doc(db, "users", fUid));
+                if (fSnap.exists()) {
+                    const fData = fSnap.data();
+                    containerEl.innerHTML += `
+                        <div class="flex items-center gap-3 p-3 bg-gray-50 dark:bg-zinc-800 rounded-2xl cursor-pointer hover:bg-emerald-50 transition mb-2 text-left" onclick="closeFullUserListModal(); openUserProfile('${fData.uid}')">
+                            <img src="${fData.fotoProfil}" class="w-10 h-10 rounded-full object-cover ${getProfilePicRingClass(fData)}">
+                            <div><p class="text-sm font-bold text-gray-800 dark:text-white">${fData.nama}</p><p class="text-xs text-emerald-600">@${fData.username}</p></div>
+                        </div>
+                    `;
+                }
+            }
+        };
+
+        window.closeFullUserListModal = () => { document.getElementById('full-list-modal').classList.add('hidden'); };
+
+        window.openUserProfile = async (targetUid) => {
+            if (!window.currentUser) return;
+            switchView('view-user-profile', 'Profil Warga');
+            const targetSnap = await getDoc(doc(db, "users", targetUid));
+            if (!targetSnap.exists()) return;
+
+            const tData = targetSnap.data();
+            const imgEl = document.getElementById('other-profile-img');
+            imgEl.src = tData.fotoProfil || "https://iili.io/J2r6Wba.png";
+            imgEl.className = `w-24 h-24 rounded-full object-cover shadow-md border-4 border-emerald-50 mb-4 ${getProfilePicRingClass(tData)}`;
+            imgEl.onclick = () => openStatusViewer(targetUid, false);
+
+            document.getElementById('other-profile-name').innerText = tData.nama;
+            document.getElementById('other-profile-username').innerText = "@" + (tData.username || "-");
+            document.getElementById('other-profile-bio').innerText = tData.biodata || "Belum ada biodata.";
+
+            const followersList = tData.followers || [];
+            const followingList = tData.following || [];
+            const followRequests = tData.followRequests || [];
+            
+            const isPrivate = tData.isPrivate === true;
+            const mySnap = await getDoc(doc(db, "users", window.currentUser.uid));
+            const myData = mySnap.exists() ? mySnap.data() : {};
+            const isFollowing = (myData.following || []).includes(targetUid);
+            const isRequested = followRequests.includes(window.currentUser.uid);
+
+            const detailsSection = document.getElementById('other-profile-details-section');
+            const privateNotice = document.getElementById('other-profile-private-notice');
+            const postsContainerSec = document.getElementById('other-profile-posts-section');
+
+            if (isPrivate && !isFollowing && targetUid !== window.currentUser.uid) {
+                if(detailsSection) detailsSection.classList.add('hidden');
+                if(privateNotice) privateNotice.classList.remove('hidden');
+                if(postsContainerSec) postsContainerSec.classList.add('hidden');
+            } else {
+                if(detailsSection) detailsSection.classList.remove('hidden');
+                if(privateNotice) privateNotice.classList.add('hidden');
+                if(postsContainerSec) postsContainerSec.classList.remove('hidden');
+
+                document.getElementById('other-count-followers').innerText = followersList.length;
+                document.getElementById('other-count-following').innerText = followingList.length;
+                renderLimitedUserList('other-followers-list', followersList, 'Daftar Pengikut', targetUid);
+                renderLimitedUserList('other-following-list', followingList, 'Daftar Mengikuti', targetUid);
+                
+                loadPersonalPosts(targetUid, 'other-personal-posts');
+            }
+
+            const actionBtnContainer = document.getElementById('other-profile-actions');
+            if(actionBtnContainer) {
+                if (targetUid === window.currentUser.uid) {
+                    actionBtnContainer.innerHTML = "";
+                } else if (isPrivate && !isFollowing) {
+                    actionBtnContainer.innerHTML = `
+                        <button onclick="toggleFollowFromProfile('${targetUid}', ${isFollowing}, ${isRequested}, true)" class="flex-1 py-3 rounded-xl font-bold text-sm transition ${isRequested ? 'bg-amber-100 text-amber-800' : 'bg-emerald-600 text-white shadow-md'}">
+                            ${isRequested ? 'Permintaan Terkirim' : 'Ikuti (Privat)'}
+                        </button>
+                    `;
+                } else {
+                    actionBtnContainer.innerHTML = `
+                        <button onclick="toggleFollowFromProfile('${targetUid}', ${isFollowing}, ${isRequested}, false)" class="flex-1 py-3 rounded-xl font-bold text-sm transition ${isFollowing ? 'bg-gray-200 text-gray-700 dark:bg-zinc-700 dark:text-white' : 'bg-emerald-600 text-white shadow-md'}">
+                            ${isFollowing ? 'Mengikuti' : 'Ikuti'}
+                        </button>
+                    `;
+                }
+            }
+
+            const chatBtnContainer = document.getElementById('other-chat-btn-container');
+            if(chatBtnContainer) {
+                if (!isPrivate || isFollowing || targetUid === window.currentUser.uid) {
+                    chatBtnContainer.innerHTML = `
+                        <button onclick="openChatRoom('${targetUid}', '${escapeHtml(tData.nama)}', '${tData.fotoProfil}')" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2">
+                            <span>💬</span> Kirim Pesan Pribadi
+                        </button>
+                    `;
+                    chatBtnContainer.classList.remove('hidden');
+                } else {
+                    chatBtnContainer.classList.add('hidden');
+                }
+            }
+        };
+
+        window.toggleFollowFromProfile = async (targetUid, isCurrentlyFollowing, isCurrentlyRequested, isTargetPrivate) => {
+            if (!window.currentUser) return;
+            const myRef = doc(db, "users", window.currentUser.uid);
+            const targetRef = doc(db, "users", targetUid);
+
+            if (isTargetPrivate && !isCurrentlyFollowing && !isCurrentlyRequested) {
+                await updateDoc(targetRef, { followRequests: arrayUnion(window.currentUser.uid) });
+                showNotificationModal("Permintaan Terkirim", "Permintaan mengikuti telah dikirim.", true);
+            } else if (isCurrentlyFollowing) {
+                await updateDoc(myRef, { following: arrayRemove(targetUid) });
+                await updateDoc(targetRef, { followers: arrayRemove(window.currentUser.uid) });
+            } else if (isCurrentlyRequested) {
+                await updateDoc(targetRef, { followRequests: arrayRemove(window.currentUser.uid) });
+                showNotificationModal("Dibatalkan", "Permintaan mengikuti dibatalkan.", true);
+            } else {
+                await updateDoc(myRef, { following: arrayUnion(targetUid) });
+                await updateDoc(targetRef, { followers: arrayUnion(window.currentUser.uid) });
+            }
+            openUserProfile(targetUid);
+        };
+
+        function loadMyProfileData() {
+            if (window.isAdmin || !window.currentUser) return;
+            onSnapshot(doc(db, "users", window.currentUser.uid), async (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    document.getElementById('my-profile-name').innerText = data.nama;
+                    document.getElementById('my-profile-username').innerText = "@" + (data.username || "-");
+                    document.getElementById('my-profile-bio').innerText = data.biodata || "Belum ada biodata.";
+                    
+                    const imgEl = document.getElementById('my-profile-img');
+                    imgEl.src = data.fotoProfil || "https://iili.io/J2r6Wba.png";
+                    imgEl.className = `w-24 h-24 rounded-full object-cover shadow-md border-4 border-emerald-50 mb-4 ${getProfilePicRingClass(data)}`;
+                    imgEl.onclick = () => openStatusViewer(window.currentUser.uid, true);
+                    
+                    const followersList = data.followers || [];
+                    const followingList = data.following || [];
+                    
+                    document.getElementById('count-followers').innerText = followersList.length;
+                    document.getElementById('count-following').innerText = followingList.length;
+                    document.getElementById('edit-bio').value = data.biodata || "";
+                    document.getElementById('toggle-private-profile').checked = data.isPrivate === true;
+
+                    renderLimitedUserList('my-followers-list', followersList, 'Daftar Pengikut Anda', window.currentUser.uid);
+                    renderLimitedUserList('my-following-list', followingList, 'Daftar Mengikuti Anda', window.currentUser.uid);
+                    
+                    loadPersonalPosts(window.currentUser.uid, 'my-personal-posts');
+                }
+            });
+        }
+
+        window.togglePrivateAccount = async (event) => {
+            if (!window.currentUser) return;
+            const isChecked = event.target.checked;
+            try {
+                await updateDoc(doc(db, "users", window.currentUser.uid), { isPrivate: isChecked });
+                showNotificationModal("Privasi Diperbarui", isChecked ? "Akun Anda sekarang bersifat Privat." : "Akun Anda sekarang bersifat Publik.", true);
+            } catch (err) { alert("Gagal memperbarui status privasi: " + err.message); }
+        };
+
+        window.triggerUploadFoto = () => { document.getElementById('input-file-foto').click(); };
+
+        window.handleFotoProfilChange = async (event) => {
+            if (!window.currentUser) return;
+            const file = event.target.files[0];
+            if (!file) return;
+            try {
+                showNotificationModal("Memproses...", "Menyimpan foto profil...", true);
+                const base64Img = await compressImage(file);
+                await updateDoc(doc(db, "users", window.currentUser.uid), { fotoProfil: base64Img });
+                showNotificationModal("Berhasil!", "Foto profil diperbarui.", true);
+            } catch (err) { showNotificationModal("Gagal", err.message, false); }
+        };
+
+        window.updateMyProfile = async (e) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            const biodata = document.getElementById('edit-bio').value;
+            try {
+                await updateDoc(doc(db, "users", window.currentUser.uid), { biodata });
+                showNotificationModal("Berhasil", "Biodata berhasil diperbarui!", true);
+            } catch(err) { showNotificationModal("Gagal", err.message, false); }
+        };
+
+        const bannedWords = ["anjing", "babi", "bangsat", "kampret", "tolol", "goblok", "kontol", "memek", "keparat", "setan", "pler"];
+
+        window.checkChatInput = () => {
+            const text = document.getElementById('chat-input-text').value.toLowerCase();
+            const sendBtn = document.getElementById('btn-send-chat');
+            let containsForbidden = false;
+            bannedWords.forEach(word => { if (text.includes(word)) containsForbidden = true; });
+
+            if (containsForbidden) {
+                if(sendBtn) { sendBtn.disabled = true; sendBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+                document.getElementById('banned-chat-modal').classList.remove('hidden');
+            } else {
+                if(sendBtn) { sendBtn.disabled = false; sendBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            }
+        };
+
+        window.closeBannedChatModal = () => { document.getElementById('banned-chat-modal').classList.add('hidden'); };
+
+        window.openChatRoom = async (partnerUid, partnerName, partnerFoto) => {
+            if (!window.currentUser) return;
+            currentChatPartnerUid = partnerUid;
+            document.getElementById('chat-partner-name').innerText = partnerName;
+            document.getElementById('chat-partner-img').src = partnerFoto;
+            document.getElementById('chat-modal').classList.remove('hidden');
+
+            const chatId = window.currentUser.uid < partnerUid ? `${window.currentUser.uid}_${partnerUid}` : `${partnerUid}_${window.currentUser.uid}`;
+            const q = query(collection(db, "chats", chatId, "messages"), orderBy("timestamp", "asc"));
+
+            if (chatUnsubscribe) chatUnsubscribe();
+
+            chatUnsubscribe = onSnapshot(q, (snapshot) => {
+                const chatContainer = document.getElementById('chat-messages-container');
+                if(!chatContainer) return;
+                chatContainer.innerHTML = "";
+
+                snapshot.forEach((docSnap) => {
+                    const msg = docSnap.data();
+                    const msgId = docSnap.id;
+                    const isMyMessage = window.currentUser && msg.senderUid === window.currentUser.uid;
+                    
+                    if (window.currentUser && (msg.deletedFor || []).includes(window.currentUser.uid)) return;
+
+                    let mediaHtml = "";
+                    if (msg.mediaUrl) {
+                        if(msg.mediaType === 'video') {
+                            mediaHtml = `<video src="${msg.mediaUrl}" controls class="w-48 h-auto rounded-xl mt-2 object-cover bg-black"></video>`;
+                        } else {
+                            mediaHtml = `<img src="${msg.mediaUrl}" class="w-48 h-auto rounded-xl mt-2 object-cover">`;
+                        }
+                    }
+                    
+                    let deleteBtn = isMyMessage ? `<button onclick="promptDeleteMessage('${chatId}', '${msgId}')" class="text-[10px] text-red-200 hover:text-white mt-1 block text-right underline cursor-pointer">Hapus</button>` : "";
+
+                    chatContainer.innerHTML += `
+                        <div class="flex ${isMyMessage ? 'justify-end' : 'justify-start'} mb-3">
+                            <div class="max-w-[75%] px-4 py-2.5 rounded-2xl text-sm ${isMyMessage ? 'bg-emerald-600 text-white rounded-br-none shadow-sm' : 'bg-gray-100 dark:bg-zinc-800 text-gray-800 dark:text-white rounded-bl-none'}">
+                                <p>${msg.text || ''}</p>
+                                ${mediaHtml}
+                                <div class="flex items-center justify-between gap-4 mt-1">
+                                    <span class="text-[9px] ${isMyMessage ? 'text-emerald-100' : 'text-gray-400'}">${msg.waktu || ''}</span>
+                                    ${deleteBtn}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            });
+        };
+
+        window.closeChatModal = () => {
+            document.getElementById('chat-modal').classList.add('hidden');
+            if (chatUnsubscribe) { chatUnsubscribe(); chatUnsubscribe = null; }
+            currentChatPartnerUid = null;
+        };
+
+        window.sendChatMessage = async (e) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            const inputEl = document.getElementById('chat-input-text');
+            const fileInput = document.getElementById('chat-input-file');
+            const text = inputEl.value.trim();
+            const file = fileInput.files[0];
+            if (!text && !file) return;
+
+            const sendBtn = document.getElementById('btn-send-chat');
+            sendBtn.disabled = true; sendBtn.innerText = "Mengirim...";
+
+            const chatId = window.currentUser.uid < currentChatPartnerUid ? `${window.currentUser.uid}_${currentChatPartnerUid}` : `${currentChatPartnerUid}_${window.currentUser.uid}`;
+            const messagesRef = collection(db, "chats", chatId, "messages");
+            const waktuStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+
+            try {
+                let mediaUrl = "";
+                let mediaType = "image";
+                if (file) {
+                    if (file.type.startsWith('video/')) {
+                        if (file.size > 700 * 1024) throw new Error("Ukuran video maksimal 700 KB.");
+                        mediaType = "video";
+                        mediaUrl = await fileToBase64(file);
+                    } else {
+                        mediaUrl = await compressImage(file);
+                    }
+                }
+
+                await addDoc(messagesRef, { 
+                    senderUid: window.currentUser.uid, 
+                    text: text, 
+                    mediaUrl: mediaUrl, 
+                    mediaType: mediaType,
+                    timestamp: new Date(), 
+                    waktu: waktuStr, 
+                    deletedFor: [] 
+                });
+
+                inputEl.value = "";
+                fileInput.value = "";
+            } catch (err) { alert("Gagal kirim pesan: " + err.message); }
+            finally { sendBtn.disabled = false; sendBtn.innerText = "Kirim"; }
+        };
+
+        window.promptDeleteMessage = (chatId, msgId) => {
+            const modal = document.getElementById('delete-chat-options-modal');
+            if(!modal) return;
+            document.getElementById('confirm-delete-private-btn').onclick = () => executeDeleteMessage(chatId, msgId, 'private');
+            document.getElementById('confirm-delete-all-btn').onclick = () => executeDeleteMessage(chatId, msgId, 'all');
+            modal.classList.remove('hidden');
+        };
+
+        window.closeDeleteChatOptionsModal = () => { document.getElementById('delete-chat-options-modal').classList.add('hidden'); };
+
+        window.executeDeleteMessage = async (chatId, msgId, mode) => {
+            if (!window.currentUser) return;
+            closeDeleteChatOptionsModal();
+            try {
+                const msgRef = doc(db, "chats", chatId, "messages", msgId);
+                if (mode === 'private') {
+                    await updateDoc(msgRef, { deletedFor: arrayUnion(window.currentUser.uid) });
+                } else if (mode === 'all') {
+                    await deleteDoc(msgRef);
+                }
+            } catch(err) { alert("Gagal menghapus pesan: " + err.message); }
+        };
+
+        function loadAdminUserList() {
+            onSnapshot(collection(db, "users"), (snapshot) => {
+                const container = document.getElementById('admin-user-list-container');
+                if (!container) return;
+                container.innerHTML = "";
+
+                snapshot.forEach((docSnap) => {
+                    const uData = docSnap.data();
+                    if (uData.email !== 'admingeomengabdi@gmail.com') {
+                        let statusBadge = `<span class="bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full text-xs font-bold">Aktif</span>`;
+                        let actionButtons = `
+                            <button onclick="bannedUser('${uData.uid}', 'sementara')" class="bg-amber-500 hover:bg-amber-600 text-white text-xs px-3 py-1.5 rounded-xl font-bold transition">Blokir 7 Hari</button>
+                            <button onclick="bannedUser('${uData.uid}', 'permanen')" class="bg-red-600 hover:bg-red-700 text-white text-xs px-3 py-1.5 rounded-xl font-bold transition">Blokir Permanen</button>
+                        `;
+
+                        if (uData.statusBlokir === 'sementara') {
+                            statusBadge = `<span class="bg-amber-100 text-amber-700 px-2.5 py-1 rounded-full text-xs font-bold">Blokir Sementara</span>`;
+                            actionButtons = `<button onclick="unbanUser('${uData.uid}')" class="bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-xl font-bold">Cabut Blokir</button>`;
+                        } else if (uData.statusBlokir === 'permanen') {
+                            statusBadge = `<span class="bg-red-100 text-red-700 px-2.5 py-1 rounded-full text-xs font-bold">Blokir Permanen</span>`;
+                            actionButtons = `<button onclick="unbanUser('${uData.uid}')" class="bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-xl font-bold">Cabut Blokir</button>`;
+                        }
+
+                        container.innerHTML += `
+                            <div class="bg-gray-50 dark:bg-zinc-800 p-4 rounded-2xl flex flex-col md:flex-row items-start md:items-center justify-between border border-gray-100 dark:border-zinc-700 mb-3 gap-3 text-left">
+                                <div class="flex items-center gap-3">
+                                    <img src="${uData.fotoProfil}" class="w-10 h-10 rounded-full object-cover ${getProfilePicRingClass(uData)}">
+                                    <div><h4 class="font-bold text-sm text-gray-800 dark:text-white">${uData.nama} (@${uData.username})</h4><p class="text-xs text-gray-500">${uData.email}</p></div>
+                                </div>
+                                <div class="flex items-center gap-3">${statusBadge} ${actionButtons}</div>
+                            </div>
+                        `;
+                    }
+                });
+            });
+        }
+
+        window.bannedUser = async (uid, jenis) => {
+            const updateData = { statusBlokir: jenis };
+            if (jenis === 'sementara') {
+                const targetDate = new Date();
+                targetDate.setDate(targetDate.getDate() + 7);
+                updateData.tanggalBukaBlokir = targetDate.toISOString();
+            }
+            await updateDoc(doc(db, "users", uid), updateData);
+            showNotificationModal("Berhasil", `Akun diblokir (${jenis}).`, true);
+        };
+
+        window.unbanUser = async (uid) => {
+            await updateDoc(doc(db, "users", uid), { statusBlokir: 'aktif', tanggalBukaBlokir: null });
+            showNotificationModal("Berhasil", "Blokir dicabut.", true);
+        };
+
+        function compressImage(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.src = event.target.result;
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        let width = img.width; let height = img.height;
+                        const MAX_WIDTH = 500; const MAX_HEIGHT = 500;
+                        if (width > height) { if (width > MAX_WIDTH) { height *= MAX_WIDTH / width; width = MAX_WIDTH; } }
+                        else { if (height > MAX_HEIGHT) { width *= MAX_HEIGHT / height; height = MAX_HEIGHT; } }
+                        canvas.width = width; canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.6));
+                    };
+                    img.onerror = (error) => reject(error);
+                };
+            });
+        }
+
+        function fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(file);
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = error => reject(error);
+            });
+        }
+
+        window.switchInfoTab = (tabName) => {
+            const btnT = document.getElementById('tab-btn-terkini');
+            const btnL = document.getElementById('tab-btn-lainnya');
+            const secT = document.getElementById('section-info-terkini');
+            const secL = document.getElementById('section-info-lainnya');
+            if(tabName === 'terkini') {
+                if(btnT) btnT.className = "px-6 py-2.5 rounded-xl font-bold text-sm bg-emerald-600 text-white shadow-md";
+                if(btnL) btnL.className = "px-6 py-2.5 rounded-xl font-bold text-sm bg-white dark:bg-zinc-800 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-zinc-700";
+                if(secT) secT.classList.remove('hidden'); if(secL) secL.classList.add('hidden');
+            } else {
+                if(btnL) btnL.className = "px-6 py-2.5 rounded-xl font-bold text-sm bg-emerald-600 text-white shadow-md";
+                if(btnT) btnT.className = "px-6 py-2.5 rounded-xl font-bold text-sm bg-white dark:bg-zinc-800 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-zinc-700";
+                if(secL) secL.classList.remove('hidden'); if(secT) secT.classList.add('hidden');
+            }
+        };
+
+        window.showNotificationModal = (title, message, isSuccess = true) => {
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `
+                <div class="bg-white dark:bg-zinc-900 rounded-3xl w-full max-w-sm shadow-2xl p-6 text-center transform transition-all animate-scale-up border border-gray-100 dark:border-zinc-800">
+                    <div class="mb-4"><div class="w-16 h-16 ${isSuccess ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600'} rounded-full flex items-center justify-center text-3xl mx-auto shadow-inner">${isSuccess ? '🎉' : '⚠️'}</div></div>
+                    <h3 class="text-2xl font-bold text-gray-800 dark:text-white mb-2">${title}</h3>
+                    <p class="text-gray-600 dark:text-gray-300 text-sm mb-6">${message}</p>
+                    <button onclick="closeNotificationModal()" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl shadow-md">Mengerti</button>
+                </div>
+            `;
+            modal.classList.remove('hidden');
+        };
+
+        window.closeNotificationModal = () => { document.getElementById('notification-modal').classList.add('hidden'); };
+
+        window.confirmDeletePost = (collectionName, id) => {
+            if (!window.isAdmin) return;
+            itemToDelete = { collectionName, id };
+            const modal = document.getElementById('notification-modal');
+            modal.innerHTML = `
+                <div class="bg-white dark:bg-zinc-900 rounded-3xl w-full max-w-sm shadow-2xl p-6 text-center">
+                    <h3 class="text-xl font-bold text-gray-800 dark:text-white mb-2">Konfirmasi Hapus</h3>
+                    <p class="text-gray-600 dark:text-gray-300 text-sm mb-6">Hapus postingan ini?</p>
+                    <div class="flex gap-3"><button onclick="executeDelete()" class="flex-1 bg-red-600 text-white font-bold py-3 rounded-xl">Ya</button><button onclick="closeNotificationModal()" class="flex-1 bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-white font-bold py-3 rounded-xl">Batal</button></div>
+                </div>
+            `;
+            modal.classList.remove('hidden');
+        };
+
+        window.executeDelete = async () => {
+            if (!itemToDelete) return;
+            await deleteDoc(doc(db, itemToDelete.collectionName, itemToDelete.id));
+            closeNotificationModal();
+            itemToDelete = null;
+        };
+
+        let editModeId = null; let editCollection = "";
+        window.openForm = (collectionName) => {
+            editCollection = collectionName; editModeId = null;
+            document.getElementById('form-modal').classList.remove('hidden');
+            document.getElementById('input-judul').value = ""; document.getElementById('input-konten').value = "";
+            if(collectionName === 'informasi') document.getElementById('form-gambar-container').classList.remove('hidden');
+            else document.getElementById('form-gambar-container').classList.add('hidden');
+        };
+        window.closeForm = () => { document.getElementById('form-modal').classList.add('hidden'); };
+
+        window.submitForm = async (e) => {
+            e.preventDefault();
+            const judul = document.getElementById('input-judul').value;
+            const konten = document.getElementById('input-konten').value;
+            const file = document.getElementById('input-gambar').files[0];
+            try {
+                let imageUrl = ""; if (file) imageUrl = await compressImage(file);
+                const now = new Date();
+                const tanggalStr = now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+                const docData = { judul, konten, timestamp: now, tanggalFormatted: tanggalStr, likes: [], komentar: [] };
+                if (imageUrl) docData.imageUrl = imageUrl;
+                if (editModeId) await updateDoc(doc(db, editCollection, editModeId), docData);
+                else await addDoc(collection(db, editCollection), docData);
+                closeForm();
+            } catch (err) { alert(err.message); }
+        };
+
+        window.toggleLike = async (postId, currentLikes) => {
+            if (!window.currentUser) return;
+            const postRef = doc(db, "informasi", postId);
+            if (currentLikes && currentLikes.includes(window.currentUser.email)) await updateDoc(postRef, { likes: arrayRemove(window.currentUser.email) });
+            else await updateDoc(postRef, { likes: arrayUnion(window.currentUser.email) });
+        };
+
+        window.sharePost = (judul) => {
+            if (navigator.share) navigator.share({ title: judul, text: judul, url: window.location.href }).catch(() => {});
+            else { navigator.clipboard.writeText(window.location.href); showNotificationModal("Disalin", "Link tersalin!", true); }
+        };
+
+        window.toggleCommentBox = (postId) => { document.getElementById(`comment-box-${postId}`).classList.toggle('hidden'); };
+
+        window.submitComment = async (e, postId) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            const inputEl = document.getElementById(`comment-input-${postId}`);
+            const text = inputEl.value.trim(); if(!text) return;
+            const postRef = doc(db, "informasi", postId);
+            const namaUser = window.currentUser.displayName || window.currentUser.email.split('@')[0];
+            await updateDoc(postRef, { komentar: arrayUnion({ nama: namaUser, teks: text, waktu: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }) });
+            inputEl.value = "";
+        };
+
+        function loadInformasi() {
+            onSnapshot(collection(db, "informasi"), (snapshot) => {
+                const todayContainer = document.getElementById('info-today-container');
+                const pastContainer = document.getElementById('info-past-container');
+                if(!todayContainer || !pastContainer) return;
+                todayContainer.innerHTML = ""; pastContainer.innerHTML = "";
+
+                const now = new Date();
+                const todayStr = now.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+
+                snapshot.forEach((docSnap) => {
+                    const docId = docSnap.id; const data = docSnap.data();
+                    const isToday = (data.tanggalFormatted === todayStr);
+                    const likesList = data.likes || [];
+                    const isLiked = window.currentUser && likesList.includes(window.currentUser.email);
+                    const komentars = data.komentar || [];
+
+                    let commentsHtml = komentars.map(k => `<div class="bg-gray-50 dark:bg-zinc-800 p-2 rounded-xl text-xs mb-2 text-left"><span class="font-bold text-emerald-800 dark:text-emerald-300">${k.nama}</span><p class="text-gray-700 dark:text-gray-300">${k.teks}</p></div>`).join('');
+                    let adminBtns = window.isAdmin ? `<div class="mt-4 pt-4 border-t flex gap-4"><button onclick="confirmDeletePost('informasi', '${docId}')" class="text-red-500 text-sm font-semibold">Hapus</button></div>` : "";
+
+                    const cardHtml = `
+                        <div class="bg-white dark:bg-zinc-900 dark:border-zinc-800 p-6 rounded-3xl shadow-sm border border-gray-100 mb-6 text-left">
+                            ${data.imageUrl ? `<img src="${data.imageUrl}" class="w-full h-56 object-cover rounded-xl mb-4">` : ""}
+                            <h3 class="font-bold text-xl text-emerald-900 dark:text-emerald-400">${data.judul}</h3>
+                            <p class="text-gray-600 dark:text-gray-300 mt-2 text-sm">${data.konten}</p>
+                            <div class="flex items-center justify-between mt-6 pt-4 border-t text-sm">
+                                <div class="flex items-center gap-4">
+                                    <button onclick="toggleLike('${docId}', ${JSON.stringify(likesList).replace(/"/g, '&quot;')})" class="${isLiked ? 'text-red-500' : 'text-gray-500'} font-semibold">❤️ ${likesList.length}</button>
+                                    <button onclick="toggleCommentBox('${docId}')" class="text-gray-500 font-semibold">💬 ${komentars.length}</button>
+                                </div>
+                                <button onclick="sharePost('${escapeHtml(data.judul)}')" class="text-gray-500 font-semibold">🔗 Bagikan</button>
+                            </div>
+                            <div id="comment-box-${docId}" class="hidden mt-4 pt-4 border-t border-dashed">
+                                <div class="max-h-40 overflow-y-auto mb-3">${commentsHtml || '<p class="text-xs text-gray-400 italic">Belum ada komentar.</p>'}</div>
+                                <form onsubmit="submitComment(event, '${docId}')" class="flex gap-2"><input type="text" id="comment-input-${docId}" placeholder="Tulis komentar..." class="flex-1 bg-gray-50 dark:bg-zinc-800 border text-xs px-3 py-2 rounded-xl outline-none"><button type="submit" class="bg-emerald-600 text-white text-xs font-bold px-4 py-2 rounded-xl">Kirim</button></form>
+                            </div>
+                            ${adminBtns}
+                        </div>
+                    `;
+                    if (isToday) todayContainer.innerHTML += cardHtml;
+                    else pastContainer.innerHTML += cardHtml;
+                });
+            });
+        }
+
+        function escapeHtml(text) { return text ? text.replace(/'/g, "&#39;").replace(/"/g, "&quot;") : ''; }
+
+        function loadEdukasi() {
+            onSnapshot(collection(db, "edukasi"), (snapshot) => {
+                const container = document.getElementById('edu-container');
+                if(!container) return;
+                container.innerHTML = "";
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    container.innerHTML += `<div class="bg-emerald-50 dark:bg-zinc-800 p-5 rounded-xl shadow-sm mb-4 border border-emerald-100 dark:border-zinc-700 text-left"><h3 class="font-bold text-lg text-emerald-900 dark:text-emerald-400">${data.judul}</h3><p class="text-gray-700 dark:text-gray-300 mt-2">${data.konten}</p></div>`;
+                });
+            });
+        }
+
+        function loadMap() {
+            if(!mapInstance) {
+                mapInstance = L.map('map').setView([-0.425, 116.987], 11);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstance);
+                onSnapshot(collection(db, "lokasi_sampah"), (snapshot) => {
+                    mapInstance.eachLayer((layer) => { if (layer instanceof L.Marker) mapInstance.removeLayer(layer); });
+                    snapshot.forEach((docSnap) => {
+                        const data = docSnap.data();
+                        L.marker([data.lat, data.lng]).addTo(mapInstance).bindPopup(`<b>${data.nama}</b><br>Kode: ${data.kode}`);
+                    });
+                });
+            }
+        }
+
+        function loadTrackRecordData() {
+            onSnapshot(collection(db, "track_record"), (snapshot) => {
+                let labels = []; let dataValues = [];
+                snapshot.forEach(doc => { labels.push(doc.data().bulan); dataValues.push(doc.data().berat); });
+                if(labels.length === 0) { labels = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun']; dataValues = [120, 190, 300, 250, 400, 450]; }
+                updateChart(labels, dataValues);
+            });
+        }
+
+        function updateChart(labels, dataValues) {
+            const ctx = document.getElementById('trackChart').getContext('2d');
+            if(!ctx) return;
+            if(trackChartInstance) { trackChartInstance.destroy(); }
+            trackChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: { labels: labels, datasets: [{ label: 'Partisipasi Warga (Kg)', data: dataValues, backgroundColor: 'rgba(16, 185, 129, 0.7)', borderRadius: 8 }] },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+    </script>
+    <style>
+        body { background-color: #ffffff !important; color: #111827 !important; }
+        .dark-mode { background-color: #121212 !important; color: #e0e0e0 !important; }
+        .dark-mode .bg-white { background-color: #1e1e1e !important; color: #e0e0e0 !important; border-color: #2d2d2d !important; }
+        .dark-mode .bg-gray-50 { background-color: #181818 !important; color: #e0e0e0 !important; }
+        .dark-mode .text-gray-800 { color: #f3f4f6 !important; }
+        .dark-mode .text-gray-600 { color: #9ca3af !important; }
+        .dark-mode input, .dark-mode textarea { background-color: #2a2a2a !important; color: #fff !important; border-color: #3f3f46 !important; }
+        
+        @keyframes scaleUp {
+            from { transform: scale(0.8); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+        .animate-scale-up {
+            animation: scaleUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        @keyframes pulseGlow {
+            0%, 100% { transform: scale(1); filter: drop-shadow(0 0 15px rgba(16, 185, 129, 0.4)); }
+            50% { transform: scale(1.05); filter: drop-shadow(0 0 25px rgba(16, 185, 129, 0.8)); }
+        }
+        .animate-logo-pulse {
+            animation: pulseGlow 3s infinite ease-in-out;
+        }
+    </style>
+</head>
+<body class="font-sans text-gray-800" onload="loadNightModePref(); renderSearchHistory();">
+
+    <!-- SPLASH SCREEN DENGAN LOGO BERANIMASI DAN TOMBOL START -->
+    <div id="splash-screen" class="hidden fixed inset-0 bg-gradient-to-br from-emerald-950 via-teal-900 to-gray-900 flex flex-col items-center justify-center z-[140] p-6 text-white text-center">
+        <div class="max-w-md w-full bg-white/10 dark:bg-zinc-900/40 backdrop-blur-md p-10 rounded-3xl border border-white/20 shadow-2xl flex flex-col items-center">
+            <!-- LOGO DENGAN ANIMASI -->
+            <img src="https://iili.io/J2r6Wba.png" alt="GeoCare Logo" class="w-32 h-32 md:w-40 md:h-40 rounded-full object-cover mb-6 border-4 border-emerald-400 shadow-lg animate-logo-pulse">
+            
+            <h1 class="text-3xl font-extrabold mb-2 tracking-tight">Geo Mengabdi</h1>
+            <p class="text-emerald-300 text-xs md:text-sm font-medium mb-8">Earth & Environment Protection System</p>
+            
+            <!-- TOMBOL START -->
+            <button onclick="startAppFromSplash()" class="w-full bg-emerald-500 hover:bg-emerald-600 text-emerald-950 font-extrabold py-4 rounded-2xl shadow-xl transition transform hover:-translate-y-0.5 text-base tracking-wide flex items-center justify-center gap-2">
+                <span>🚀</span> Mulai Aplikasi (Start)
+            </button>
+        </div>
+    </div>
+
+    <div id="delete-post-confirm-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 backdrop-blur-sm flex items-center justify-center z-[130] p-4 transition-opacity">
+        <div class="bg-white dark:bg-zinc-900 rounded-3xl p-6 max-w-sm text-center shadow-2xl animate-scale-up border border-gray-100 dark:border-zinc-800">
+            <div class="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center text-3xl mx-auto mb-4 shadow-inner">⚠️</div>
+            <h3 class="text-xl font-bold text-gray-900 dark:text-white mb-2">Apakah anda yakin?</h3>
+            <p class="text-gray-600 dark:text-gray-300 text-xs mb-6">Postingan pribadi yang dihapus tidak dapat dikembalikan lagi.</p>
+            <div class="flex gap-3">
+                <button onclick="executeDeletePersonalPost()" class="flex-1 bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl text-sm transition shadow-md">Ya, Hapus</button>
+                <button onclick="closeDeletePostConfirmModal()" class="flex-1 bg-gray-200 hover:bg-gray-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-700 dark:text-white font-bold py-3 rounded-xl text-sm transition">Batal</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="full-list-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[110] p-4">
+        <div class="bg-white dark:bg-zinc-900 rounded-3xl p-6 max-w-md w-full shadow-2xl flex flex-col max-h-[80vh]">
+            <div class="flex justify-between items-center mb-4 border-b pb-3">
+                <h3 id="full-list-title" class="text-lg font-bold">Daftar</h3>
+                <button onclick="closeFullUserListModal()" class="text-gray-400 hover:text-gray-600 font-bold text-xl px-2">✕</button>
+            </div>
+            <div id="full-list-container" class="flex-1 overflow-y-auto space-y-2"></div>
+        </div>
+    </div>
+
+    <div id="delete-chat-options-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[105] p-4">
+        <div class="bg-white dark:bg-zinc-900 rounded-3xl p-6 max-w-sm text-center shadow-2xl">
+            <h3 class="text-lg font-bold mb-2">Hapus Pesan</h3>
+            <p class="text-gray-600 dark:text-gray-300 text-xs mb-6">Pilih metode penghapusan pesan ini:</p>
+            <div class="space-y-3">
+                <button id="confirm-delete-private-btn" class="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 rounded-xl text-sm transition">Hapus chat untuk pribadi</button>
+                <button id="confirm-delete-all-btn" class="w-full bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-xl text-sm transition">Hapus chat (untuk semua)</button>
+                <button onclick="closeDeleteChatOptionsModal()" class="w-full bg-gray-200 dark:bg-zinc-700 text-gray-700 dark:text-white font-bold py-2.5 rounded-xl text-sm transition">Batal</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="banned-modal" class="hidden fixed inset-0 bg-red-950 bg-opacity-95 flex items-center justify-center z-[100] p-4 text-center">
+        <div class="bg-white rounded-3xl p-8 max-w-md shadow-2xl">
+            <div class="w-20 h-20 bg-red-100 text-red-600 rounded-full flex items-center justify-center text-4xl mx-auto mb-4">🚫</div>
+            <h2 class="text-2xl font-bold text-gray-900 mb-2">Akses Ditolak</h2>
+            <p id="banned-reason-text" class="text-gray-600 text-sm mb-6">Akun Anda diblokir.</p>
+            <button onclick="logout()" class="w-full bg-red-600 text-white font-bold py-3.5 rounded-xl">Keluar</button>
+        </div>
+    </div>
+
+    <div id="banned-chat-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[95] p-4">
+        <div class="bg-white dark:bg-zinc-900 rounded-3xl p-6 max-w-sm text-center shadow-2xl">
+            <h3 class="text-xl font-bold mb-2">Pesan Dilarang</h3>
+            <p class="text-gray-600 dark:text-gray-300 text-xs mb-5">Dilarang mengirim pesan yang mengandung unsur kekerasan atau kata kasar!</p>
+            <button onclick="closeBannedChatModal()" class="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-sm">Mengerti</button>
+        </div>
+    </div>
+
+    <div id="status-view-modal" class="hidden fixed inset-0 bg-black z-[120] flex flex-col text-white">
+        <div class="w-full bg-gray-800 h-1.5"><div id="status-progress-bar" class="bg-emerald-500 h-full w-0"></div></div>
+        <div class="p-4 flex items-center justify-between border-b border-gray-800">
+            <div class="flex items-center gap-3">
+                <img id="status-viewer-img" class="w-10 h-10 rounded-full object-cover">
+                <span id="status-viewer-name" class="font-bold text-sm"></span>
+            </div>
+            <div class="flex items-center gap-3">
+                <div id="status-viewer-delete-action"></div>
+                <button onclick="closeStatusViewerModal()" class="text-2xl font-bold px-2">✕</button>
+            </div>
+        </div>
+        <div class="flex-1 flex flex-col items-center justify-center p-4">
+            <div id="status-viewer-media" class="w-full max-w-md mb-4 text-center"></div>
+            <p id="status-viewer-text" class="text-base font-bold text-center max-w-md"></p>
+        </div>
+    </div>
+
+    <div id="add-status-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[115] p-4">
+        <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl w-full max-w-sm text-center relative shadow-2xl">
+            <h3 class="font-bold text-lg mb-2">Buat Status Baru</h3>
+            <p class="text-gray-500 text-xs mb-4">Foto atau Video (Maks 700 KB)</p>
+            <form onsubmit="submitStatus(event)">
+                <input type="file" id="status-input-file" accept="image/*,video/*" class="w-full mb-3 border dark:bg-zinc-800 p-2 rounded-xl text-xs">
+                <textarea id="status-input-text" placeholder="Tulis keterangan status..." class="w-full border dark:bg-zinc-800 p-3 rounded-xl mb-3 h-20 resize-none text-sm outline-none"></textarea>
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl text-sm shadow-md">Kirim Status</button>
+                <button type="button" onclick="document.getElementById('add-status-modal').classList.add('hidden')" class="w-full mt-2 text-gray-500 font-bold text-xs py-2">Batal</button>
+            </form>
+            <div id="status-loading" class="hidden absolute inset-0 bg-white/80 dark:bg-zinc-900/80 flex items-center justify-center font-bold text-emerald-600 rounded-3xl">Mengunggah...</div>
+        </div>
+    </div>
+
+    <div id="add-post-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[110] p-4">
+        <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl w-full max-w-md text-center relative shadow-2xl max-h-[90vh] overflow-y-auto">
+            <h3 class="font-bold text-lg mb-2">Buat Postingan Baru</h3>
+            <p class="text-gray-500 text-xs mb-4">Bagikan momen Anda, tag teman, & tambahkan musik</p>
+            <form onsubmit="submitPersonalPost(event)" class="text-left">
+                <textarea id="post-input-konten" required placeholder="Apa yang ingin Anda bagikan?" class="w-full border dark:bg-zinc-800 p-3 rounded-xl mb-3 h-20 resize-none text-sm outline-none"></textarea>
+                
+                <label class="block text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">Lampiran Foto / Video (Maks 700 KB)</label>
+                <input type="file" id="post-input-file" accept="image/*,video/*" class="w-full mb-3 border dark:bg-zinc-800 p-2 rounded-xl text-xs">
+                
+                <div class="mb-3">
+                    <label class="block text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">🏷️ Tag Teman (Sebut)</label>
+                    <input type="text" id="tag-friend-search-input" oninput="searchFriendForTag()" placeholder="Cari nama atau username teman..." class="w-full border dark:bg-zinc-800 px-3 py-2 rounded-xl text-xs outline-none">
+                    <div id="tag-friend-search-results" class="max-h-28 overflow-y-auto space-y-1 mt-1"></div>
+                    <div id="selected-tags-container"></div>
+                </div>
+
+                <div class="mb-4">
+                    <label class="block text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">🎵 Musik & Crop</label>
+                    <div class="flex gap-2 mb-2">
+                        <input type="text" id="music-search-input" placeholder="Cari judul lagu / artis..." class="flex-1 border dark:bg-zinc-800 px-3 py-2 rounded-xl text-xs outline-none">
+                        <button type="button" onclick="searchGlobalMusic()" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl text-xs font-bold shadow">Cari</button>
+                    </div>
+                    <div id="music-search-results" class="max-h-36 overflow-y-auto space-y-1"></div>
+                    <div id="selected-music-info" class="mt-2"></div>
+                </div>
+
+                <button type="submit" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl text-sm shadow-md">Posting Sekarang</button>
+                <button type="button" onclick="closeAddPostModal()" class="w-full mt-2 text-gray-500 font-bold text-xs py-2 text-center block">Batal</button>
+            </form>
+            <div id="post-loading" class="hidden absolute inset-0 bg-white/80 dark:bg-zinc-900/80 flex items-center justify-center font-bold text-emerald-600 rounded-3xl">Mengunggah...</div>
+        </div>
+    </div>
+
+    <div id="login-screen" class="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-600 to-teal-900 p-4 absolute inset-0 z-50">
+        <div class="bg-white p-10 rounded-3xl shadow-2xl text-center max-w-md w-full">
+            <h1 class="text-3xl font-extrabold text-gray-800 mb-2">Geo Mengabdi</h1>
+            <p class="text-emerald-600 font-medium mb-8">GeoCare - Peduli Lingkungan</p>
+            <button id="btn-login" class="w-full bg-emerald-600 text-white font-bold py-4 px-4 rounded-xl hover:bg-emerald-700 transition flex items-center justify-center gap-3 shadow-lg">Lanjutkan dengan Google</button>
+        </div>
+    </div>
+
+    <div id="username-modal" class="hidden fixed inset-0 bg-emerald-950 bg-opacity-90 flex items-center justify-center z-[70] p-4">
+        <div class="bg-white rounded-3xl w-full max-w-md shadow-2xl p-8 text-center">
+            <h3 class="text-2xl font-bold mb-2">Buat Username</h3>
+            <form onsubmit="saveUsername(event)">
+                <input type="text" id="input-username" required placeholder="username_unik" class="w-full border-2 p-3 rounded-xl mb-2 lowercase font-semibold outline-none">
+                <p id="username-warning" class="hidden text-xs text-red-600 mb-4 text-left">⚠️ Username sudah digunakan.</p>
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3.5 rounded-xl shadow-md">Lanjutkan</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- FORM BIODATA DENGAN VALIDASI KETAT -->
+    <div id="profile-modal" class="hidden fixed inset-0 bg-emerald-950 bg-opacity-85 flex items-center justify-center z-[60] p-4 overflow-y-auto">
+        <div class="bg-white dark:bg-zinc-900 rounded-3xl w-full max-w-2xl shadow-2xl p-8 text-left">
+            <h3 class="text-2xl font-bold mb-2 dark:text-white">Lengkapi Data Diri</h3>
+            <p class="text-xs text-gray-500 mb-6">Mohon isi data dengan valid sesuai ketentuan untuk mencegah pengisian sembarangan.</p>
+            <form onsubmit="saveProfile(event)" class="space-y-4">
+                <div>
+                    <label class="block text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">Email Google (Otomatis)</label>
+                    <input type="email" id="prof-email" class="w-full border-2 p-3 rounded-xl bg-gray-100 dark:bg-zinc-800" readonly>
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">Nomor Telepon / WhatsApp (Valid angka, 10-15 digit)</label>
+                    <input type="tel" id="prof-telepon" required placeholder="Contoh: 081234567890" class="w-full border-2 p-3 rounded-xl outline-none dark:bg-zinc-800">
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">Alamat Lengkap (Min. 10 karakter)</label>
+                    <textarea id="prof-alamat" required placeholder="Contoh: Jl. Mulawarman RT 05, Tenggarong Seberang" class="w-full border-2 p-3 rounded-xl h-20 resize-none outline-none dark:bg-zinc-800"></textarea>
+                </div>
+                <div>
+                    <label class="block text-xs font-bold text-gray-600 dark:text-gray-300 mb-1">Tempat, Tanggal Lahir (Format: Kota, Tanggal Bulan Tahun)</label>
+                    <input type="text" id="prof-ttl" required placeholder="Contoh: Samarinda, 17 Agustus 2005" class="w-full border-2 p-3 rounded-xl outline-none dark:bg-zinc-800">
+                </div>
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-4 rounded-xl shadow-md mt-2">Simpan & Masuk</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="chat-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[90] p-4">
+        <div class="bg-white dark:bg-zinc-900 rounded-3xl w-full max-w-lg shadow-2xl flex flex-col h-[550px] overflow-hidden">
+            <div class="bg-emerald-900 text-white p-4 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <img id="chat-partner-img" src="" class="w-10 h-10 rounded-full object-cover">
+                    <div><h3 id="chat-partner-name" class="font-bold text-base">Nama</h3><span class="text-[10px] text-emerald-300">Chat Pribadi</span></div>
+                </div>
+                <button onclick="closeChatModal()" class="text-white font-bold text-lg px-2">✕</button>
+            </div>
+            <div id="chat-messages-container" class="flex-1 p-4 overflow-y-auto space-y-3 bg-white dark:bg-zinc-950"></div>
+            <form onsubmit="sendChatMessage(event)" class="p-3 bg-white dark:bg-zinc-900 border-t dark:border-zinc-800 flex gap-2 items-center">
+                <label class="cursor-pointer bg-gray-100 dark:bg-zinc-800 p-2.5 rounded-xl text-lg hover:bg-gray-200 transition" title="Kirim Media">📷<input type="file" id="chat-input-file" accept="image/*,video/*" class="hidden"></label>
+                <input type="text" id="chat-input-text" autocomplete="off" oninput="checkChatInput()" placeholder="Tulis pesan..." class="flex-1 border dark:bg-zinc-800 px-4 py-2.5 rounded-xl text-sm outline-none">
+                <button type="submit" id="btn-send-chat" class="bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow-md">Kirim</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="main-app" class="hidden h-screen flex w-full overflow-hidden bg-white dark:bg-zinc-950">
+        
+        <aside id="sidebar-menu" class="absolute md:relative inset-y-0 left-0 transform -translate-x-full md:translate-x-0 transition duration-200 ease-in-out w-64 bg-emerald-900 text-white flex flex-col shadow-2xl z-40">
+            <div class="p-6 border-b border-emerald-800 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <img src="logo.png" alt="Logo" class="w-10 h-10 rounded-full object-cover border-2 border-emerald-400 bg-white p-0.5">
+                    <div><h2 class="text-xl font-extrabold">GeoCare<span class="text-emerald-400">.</span></h2><p class="text-[10px] text-emerald-300">Geo Mengabdi 2026</p></div>
+                </div>
+                <button onclick="toggleSidebarMobile(false)" class="md:hidden text-emerald-300 text-xl font-bold">✕</button>
+            </div>
+            <nav class="flex-1 p-4 space-y-2 mt-2 overflow-y-auto">
+                <button onclick="switchView('view-beranda', 'Beranda Utama')" class="w-full flex items-center gap-3 text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium"><span>🏠</span> Beranda</button>
+                <button onclick="switchView('view-informasi', 'Informasi Publik')" class="w-full flex items-center gap-3 text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium"><span>📢</span> Informasi Publik</button>
+                <button onclick="switchView('view-edukasi', 'Edukasi Sampah')" class="w-full flex items-center gap-3 text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium"><span>🌱</span> Edukasi Lingkungan</button>
+                <button onclick="switchView('view-peta', 'Peta Lokasi Bank Sampah')" class="w-full flex items-center gap-3 text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium"><span>🗺️</span> Peta Lokasi</button>
+                <button onclick="switchView('view-track', 'Track Record Warga')" class="w-full flex items-center gap-3 text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium"><span>📊</span> Track Record</button>
+                <button onclick="switchView('view-profil', 'Profil Anda')" class="w-full flex items-center gap-3 text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium"><span>👤</span> Profil Anda</button>
+                
+                <button onclick="switchView('view-notifikasi', 'Notifikasi Aktivitas')" class="w-full flex items-center justify-between text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium">
+                    <span class="flex items-center gap-3"><span>🔔</span> Notifikasi</span>
+                    <span id="badge-notifikasi" class="hidden w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse"></span>
+                </button>
+
+                <button onclick="switchView('view-pesan-saya', 'Pesan Saya')" class="w-full flex items-center justify-between text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium">
+                    <span class="flex items-center gap-3"><span>💬</span> Pesan Saya</span>
+                    <span id="badge-pesan-saya" class="hidden w-2.5 h-2.5 bg-red-500 rounded-full animate-pulse"></span>
+                </button>
+
+                <button onclick="switchView('view-admin-mod', 'Moderasi Akun')" class="admin-only hidden w-full flex items-center gap-3 text-left py-3 px-4 rounded-xl hover:bg-emerald-800 text-sm font-medium"><span>🛡️</span> Moderasi Akun</button>
+            </nav>
+            <div class="p-4 border-t border-emerald-800">
+                <button onclick="logout()" class="w-full bg-red-500/20 text-red-300 hover:bg-red-500 hover:text-white py-2 rounded-lg text-sm font-semibold transition">Logout Keluar</button>
+            </div>
+        </aside>
+
+        <main class="flex-1 flex flex-col bg-white dark:bg-zinc-950 h-screen overflow-hidden">
+            <header class="bg-white dark:bg-zinc-900 h-20 px-6 md:px-8 flex items-center justify-between shadow-sm z-10 border-b border-gray-100 dark:border-zinc-800">
+                <div class="flex items-center gap-4">
+                    <button onclick="toggleSidebarMobile()" class="md:hidden text-gray-700 dark:text-white p-2 text-xl font-bold">☰</button>
+                    <button id="btn-back" onclick="switchView('view-beranda', 'Beranda Utama')" class="hidden bg-emerald-50 text-emerald-700 px-3 py-2 rounded-xl text-sm font-bold shadow-sm">← Kembali</button>
+                    <h1 id="page-title" class="text-xl md:text-2xl font-bold text-gray-800 dark:text-white truncate">Beranda Utama</h1>
+                </div>
+                
+                <div class="flex items-center gap-3">
+                    <button onclick="switchView('view-interaksi', 'Cari Warga')" class="relative bg-gray-100 dark:bg-zinc-800 hover:bg-emerald-100 text-gray-700 dark:text-white p-2.5 rounded-full transition shadow-sm" title="Cari Teman">
+                        🔍
+                    </button>
+                    <button onclick="switchView('view-notifikasi', 'Notifikasi Aktivitas')" class="relative bg-gray-100 dark:bg-zinc-800 hover:bg-emerald-100 text-gray-700 dark:text-white p-2.5 rounded-full transition shadow-sm" title="Notifikasi">
+                        🔔
+                        <span id="badge-notifikasi-header" class="hidden absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
+                    </button>
+                    <button onclick="toggleNightMode()" class="bg-gray-100 dark:bg-zinc-800 text-gray-700 dark:text-white px-3.5 py-2 rounded-xl text-xs font-bold transition shadow-sm flex items-center gap-1.5">
+                        <span id="night-mode-text">🌙 Night Mode</span>
+                    </button>
+                </div>
+            </header>
+
+            <div class="flex-1 overflow-y-auto p-4 md:p-8 relative bg-white dark:bg-zinc-950">
+                
+                <div id="view-beranda" class="app-view animate-fade-in relative max-w-xl mx-auto">
+                    
+                    <div onclick="switchView('view-informasi', 'Informasi Publik')" class="relative rounded-3xl p-6 md:p-8 text-white shadow-xl mb-6 overflow-hidden bg-cover bg-center cursor-pointer transform hover:scale-[1.01] transition aspect-video flex flex-col justify-end" style="background-image: linear-gradient(to top, rgba(4, 120, 87, 0.95), rgba(6, 78, 59, 0.4)), url('https://images.unsplash.com/photo-1542601906990-b4d3fb778b09?auto=format&fit=crop&w=1200&q=80');">
+                        <div class="relative z-10 text-left">
+                            <span class="bg-emerald-500/40 text-emerald-100 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">GeoCare Update</span>
+                            <h2 class="text-2xl md:text-3xl font-extrabold mt-2 mb-1 leading-tight">Apa kabar mu hari ini ?</h2>
+                            <p class="text-emerald-50 text-xs md:text-sm">Klik untuk melihat pembaruan dan informasi publik terbaru hari ini →</p>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-4 gap-3 mb-6">
+                        <div onclick="switchView('view-peta', 'Peta Lokasi Bank Sampah')" class="aspect-square bg-white dark:bg-zinc-900 border dark:border-zinc-800 p-3 rounded-2xl shadow-sm cursor-pointer hover:shadow-md transition flex flex-col items-center justify-center text-center group">
+                            <div class="w-10 h-10 bg-emerald-100 text-emerald-600 rounded-xl flex items-center justify-center text-xl mb-1.5 group-hover:scale-110 transition shadow-inner">🗺️</div>
+                            <span class="text-[11px] font-bold text-gray-800 dark:text-white leading-tight">Bank Terdekat</span>
+                        </div>
+                        <div onclick="switchView('view-edukasi', 'Edukasi Sampah')" class="aspect-square bg-white dark:bg-zinc-900 border dark:border-zinc-800 p-3 rounded-2xl shadow-sm cursor-pointer hover:shadow-md transition flex flex-col items-center justify-center text-center group">
+                            <div class="w-10 h-10 bg-blue-100 text-blue-600 rounded-xl flex items-center justify-center text-xl mb-1.5 group-hover:scale-110 transition shadow-inner">🌱</div>
+                            <span class="text-[11px] font-bold text-gray-800 dark:text-white leading-tight">Edukasi</span>
+                        </div>
+                        <div onclick="switchView('view-track', 'Track Record Warga')" class="aspect-square bg-white dark:bg-zinc-900 border dark:border-zinc-800 p-3 rounded-2xl shadow-sm cursor-pointer hover:shadow-md transition flex flex-col items-center justify-center text-center group">
+                            <div class="w-10 h-10 bg-orange-100 text-orange-600 rounded-xl flex items-center justify-center text-xl mb-1.5 group-hover:scale-110 transition shadow-inner">📊</div>
+                            <span class="text-[11px] font-bold text-gray-800 dark:text-white leading-tight">Perkembangan</span>
+                        </div>
+                        <div onclick="openCustomerServiceAdmin()" class="aspect-square bg-white dark:bg-zinc-900 border dark:border-zinc-800 p-3 rounded-2xl shadow-sm cursor-pointer hover:shadow-md transition flex flex-col items-center justify-center text-center group">
+                            <div class="w-10 h-10 bg-purple-100 text-purple-600 rounded-xl flex items-center justify-center text-xl mb-1.5 group-hover:scale-110 transition shadow-inner">🎧</div>
+                            <span class="text-[11px] font-bold text-gray-800 dark:text-white leading-tight">Customer Service</span>
+                        </div>
+                    </div>
+
+                    <div class="bg-white dark:bg-zinc-900 border dark:border-zinc-800 p-4 rounded-3xl mb-6 shadow-sm flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                            <img src="https://iili.io/J2r6Wba.png" id="header-quick-profile" class="w-10 h-10 rounded-full object-cover">
+                            <span class="text-xs text-gray-400 font-medium">Bagikan momen lingkungan Anda...</span>
+                        </div>
+                        <button onclick="openAddPostModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-4 py-2.5 rounded-2xl shadow transition">✨ Buat Post</button>
+                    </div>
+
+                    <div class="bg-white dark:bg-zinc-900 border dark:border-zinc-800 p-4 rounded-3xl mb-6 shadow-sm">
+                        <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 text-left">Cerita Warga</h4>
+                        <div id="home-stories-container" class="flex gap-4 overflow-x-auto pb-2 scrollbar-none items-center text-left">
+                            <p class="text-xs text-gray-400 italic">Memuat cerita...</p>
+                        </div>
+                    </div>
+
+                    <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 text-left">Postingan Terbaru Teman</h4>
+                    <div id="home-feed-container" class="space-y-6">
+                        <p class="text-xs text-gray-400 italic text-center py-6">Memuat postingan beranda...</p>
+                    </div>
+
+                </div>
+
+                <div id="view-notifikasi" class="app-view hidden max-w-3xl mx-auto">
+                    <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl shadow-sm border border-gray-200 dark:border-zinc-800">
+                        <h3 class="font-bold text-lg text-emerald-900 dark:text-emerald-400 mb-4 flex items-center gap-2 text-left"><span>🔔</span> Notifikasi Aktivitas & Mention Teman</h3>
+                        <div id="notifications-container" class="space-y-3">
+                            <p class="text-xs text-gray-400 italic text-center py-6">Memuat notifikasi...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="view-pesan-saya" class="app-view hidden max-w-3xl mx-auto">
+                    <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl shadow-sm border border-gray-200 dark:border-zinc-800">
+                        <h3 class="font-bold text-lg text-emerald-900 dark:text-emerald-400 mb-4 flex items-center gap-2 text-left"><span>💬</span> Pesan Saya</h3>
+                        <div id="my-messages-container" class="space-y-3">
+                            <p class="text-xs text-gray-400 italic text-center py-6">Memuat daftar pesan...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="view-interaksi" class="app-view hidden max-w-3xl mx-auto">
+                    <div class="bg-white dark:bg-zinc-900 p-6 rounded-3xl shadow-sm border border-gray-200 dark:border-zinc-800">
+                        <h3 class="font-bold text-lg text-emerald-900 dark:text-emerald-400 mb-3 flex items-center gap-2 text-left"><span>🔍</span> Cari Teman & Warga Lain</h3>
+                        <div class="flex gap-2">
+                            <input type="text" id="search-user-input" placeholder="Masukkan username..." class="flex-1 border dark:bg-zinc-800 px-4 py-3 rounded-xl text-sm outline-none">
+                            <button onclick="searchUser()" class="bg-emerald-600 text-white px-6 py-3 rounded-xl text-sm font-bold shadow-md">Cari</button>
+                        </div>
+                        <div id="search-history-container" class="mt-3"></div>
+                        <div id="search-user-result" class="mt-4 space-y-2"></div>
+                    </div>
+                </div>
+
+                <div id="view-profil" class="app-view hidden max-w-2xl mx-auto">
+                    <div class="bg-white dark:bg-zinc-900 p-8 rounded-3xl shadow-sm border border-gray-200 dark:border-zinc-800">
+                        <div class="flex flex-col items-center text-center pb-6 border-b dark:border-zinc-800">
+                            <div class="relative group cursor-pointer mb-4">
+                                <img id="my-profile-img" src="https://iili.io/J2r6Wba.png" class="w-24 h-24 rounded-full object-cover shadow-md border-4 border-emerald-50" title="Tekan untuk melihat/membuat status">
+                            </div>
+                            <div class="flex gap-2 mb-2">
+                                <button onclick="if(window.currentUser) openStatusViewer(window.currentUser.uid, true)" class="bg-emerald-50 dark:bg-zinc-800 hover:bg-emerald-100 text-emerald-700 dark:text-emerald-300 px-3 py-1.5 rounded-xl text-xs font-bold transition">📸 Lihat/Buat Status</button>
+                                <button onclick="triggerUploadFoto()" class="bg-gray-100 dark:bg-zinc-800 hover:bg-gray-200 text-gray-700 dark:text-gray-300 px-3 py-1.5 rounded-xl text-xs font-bold transition">📷 Ganti Foto Profil</button>
+                            </div>
+                            <input type="file" id="input-file-foto" accept="image/*" class="hidden" onchange="handleFotoProfilChange(event)">
+                            <h2 id="my-profile-name" class="text-2xl font-bold text-emerald-900 dark:text-emerald-400 mt-2">Nama</h2>
+                            <p id="my-profile-username" class="text-emerald-600 font-medium text-sm mt-0.5">@username</p>
+                            <p id="my-profile-bio" class="text-gray-600 dark:text-gray-300 text-sm mt-3">Biodata singkat.</p>
+                            
+                            <div class="mt-4 flex items-center gap-3 bg-gray-50 dark:bg-zinc-800 px-4 py-2.5 rounded-xl border border-gray-200 dark:border-zinc-700">
+                                <span class="text-xs font-bold text-gray-700 dark:text-gray-300">🔒 Profil Privat</span>
+                                <input type="checkbox" id="toggle-private-profile" onchange="togglePrivateAccount(event)" class="w-5 h-5 accent-emerald-600 cursor-pointer">
+                            </div>
+
+                            <div class="flex gap-8 mt-6 bg-emerald-50 dark:bg-emerald-950/40 px-6 py-3 rounded-2xl border border-emerald-100 dark:border-emerald-900/50">
+                                <div class="text-center"><span id="count-followers" class="block text-xl font-extrabold text-emerald-900 dark:text-emerald-300">0</span><span class="text-xs text-gray-500 uppercase">Pengikut</span></div>
+                                <div class="w-px bg-emerald-200 dark:bg-emerald-800"></div>
+                                <div class="text-center"><span id="count-following" class="block text-xl font-extrabold text-emerald-900 dark:text-emerald-300">0</span><span class="text-xs text-gray-500 uppercase">Mengikuti</span></div>
+                            </div>
+                        </div>
+
+                        <div class="mt-6 pt-6 border-t dark:border-zinc-800 text-left">
+                            <div class="flex justify-between items-center mb-4">
+                                <h3 class="font-bold text-lg">Postingan & Kolaborasi Anda</h3>
+                                <button onclick="openAddPostModal()" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-md transition">+ Buat Post</button>
+                            </div>
+                            <div id="my-personal-posts" class="space-y-4"></div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6 pt-6 border-t dark:border-zinc-800 text-left">
+                            <div><h4 class="font-bold text-sm mb-3">Daftar Pengikut</h4><div id="my-followers-list" class="max-h-60 overflow-y-auto space-y-2"></div></div>
+                            <div><h4 class="font-bold text-sm mb-3">Daftar Mengikuti</h4><div id="my-following-list" class="max-h-60 overflow-y-auto space-y-2"></div></div>
+                        </div>
+
+                        <form onsubmit="updateMyProfile(event)" class="mt-6 pt-6 border-t dark:border-zinc-800 space-y-4 text-left">
+                            <h3 class="font-bold text-lg mb-2">Edit Biodata</h3>
+                            <textarea id="edit-bio" class="w-full border p-3 rounded-xl outline-none text-sm h-24 resize-none bg-white dark:bg-zinc-800"></textarea>
+                            <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl shadow-md">Simpan Biodata</button>
+                        </form>
+                    </div>
+                </div>
+
+                <div id="view-user-profile" class="app-view hidden max-w-2xl mx-auto">
+                    <div class="mb-4 text-left">
+                        <button onclick="goBackFromUserProfile()" class="bg-gray-100 hover:bg-gray-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-gray-700 dark:text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow-sm flex items-center gap-1.5">
+                            ← Kembali
+                        </button>
+                    </div>
+                    <div class="bg-white dark:bg-zinc-900 p-8 rounded-3xl shadow-sm border border-gray-200 dark:border-zinc-800">
+                        <div class="flex flex-col items-center text-center pb-6 border-b dark:border-zinc-800">
+                            <img id="other-profile-img" src="https://iili.io/J2r6Wba.png" class="w-24 h-24 rounded-full object-cover shadow-md border-4 border-emerald-50 mb-4 cursor-pointer" title="Tekan untuk melihat status warga">
+                            <h2 id="other-profile-name" class="text-2xl font-bold text-emerald-900 dark:text-emerald-400">Nama</h2>
+                            <p id="other-profile-username" class="text-emerald-600 font-medium text-sm mt-0.5">@username</p>
+                            <p id="other-profile-bio" class="text-gray-600 dark:text-gray-300 text-sm mt-3">Biodata</p>
+                            
+                            <div id="other-profile-private-notice" class="hidden mt-6 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 p-4 rounded-2xl text-xs font-semibold border border-amber-200 dark:border-amber-900">
+                                🔒 Akun ini bersifat PRIVAT. Kirim permintaan mengikuti untuk melihat aktivitas dan berinteraksi lengkap dengan pengguna ini.
+                            </div>
+
+                            <div id="other-profile-details-section" class="w-full">
+                                <div class="flex gap-8 mt-6 justify-center bg-emerald-50 dark:bg-emerald-950/40 px-6 py-3 rounded-2xl border border-emerald-100 dark:border-emerald-900/50 mb-6">
+                                    <div class="text-center"><span id="other-count-followers" class="block text-xl font-extrabold text-emerald-900 dark:text-emerald-300">0</span><span class="text-xs text-gray-500 uppercase">Pengikut</span></div>
+                                    <div class="w-px bg-emerald-200 dark:bg-emerald-800"></div>
+                                    <div class="text-center"><span id="other-count-following" class="block text-xl font-extrabold text-emerald-900 dark:text-emerald-300">0</span><span class="text-xs text-gray-500 uppercase">Mengikuti</span></div>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6 text-left">
+                                    <div><h4 class="font-bold text-sm mb-3">Pengikut</h4><div id="other-followers-list" class="max-h-60 overflow-y-auto space-y-2"></div></div>
+                                    <div><h4 class="font-bold text-sm mb-3">Mengikuti</h4><div id="other-following-list" class="max-h-60 overflow-y-auto space-y-2"></div></div>
+                                </div>
+                            </div>
+
+                            <div id="other-profile-posts-section" class="w-full mt-6 pt-6 border-t dark:border-zinc-800 text-left">
+                                <h3 class="font-bold text-lg mb-4">Postingan Warga</h3>
+                                <div id="other-personal-posts" class="space-y-4"></div>
+                            </div>
+
+                            <div class="w-full space-y-3 mt-6">
+                                <div id="other-profile-actions" class="flex gap-3"></div>
+                                <div id="other-chat-btn-container" class="hidden"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="view-informasi" class="app-view hidden max-w-4xl mx-auto">
+                    <div class="flex justify-between items-center mb-8">
+                        <div class="flex gap-2 bg-white dark:bg-zinc-900 p-1.5 rounded-2xl shadow-sm border border-gray-200 dark:border-zinc-800">
+                            <button id="tab-btn-terkini" onclick="switchInfoTab('terkini')" class="px-6 py-2.5 rounded-xl font-bold text-sm bg-emerald-600 text-white shadow-md">🔥 Terkini</button>
+                            <button id="tab-btn-lainnya" onclick="switchInfoTab('lainnya')" class="px-6 py-2.5 rounded-xl font-bold text-sm bg-white dark:bg-zinc-800 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-zinc-700">📂 Arsip</button>
+                        </div>
+                        <button onclick="openForm('informasi')" class="admin-only hidden bg-emerald-600 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow-md">+ Tambah Info</button>
+                    </div>
+                    <div id="section-info-terkini"><div id="info-today-container"></div></div>
+                    <div id="section-info-lainnya" class="hidden"><div id="info-past-container"></div></div>
+                </div>
+
+                <div id="view-edukasi" class="app-view hidden max-w-4xl mx-auto"><div id="edu-container" class="grid grid-cols-1 md:grid-cols-2 gap-6"></div></div>
+
+                <div id="view-peta" class="app-view hidden h-[500px] flex flex-col max-w-4xl mx-auto"><div id="map" class="w-full flex-1 rounded-2xl shadow-md border-2 border-white z-0 relative"></div></div>
+
+                <div id="view-track" class="app-view hidden max-w-4xl mx-auto"><div class="bg-white dark:bg-zinc-900 p-8 rounded-2xl shadow-sm border border-gray-200 dark:border-zinc-800 h-[400px]"><canvas id="trackChart"></canvas></div></div>
+
+                <div id="view-admin-mod" class="app-view hidden max-w-4xl mx-auto">
+                    <div class="bg-white dark:bg-zinc-900 p-8 rounded-3xl shadow-sm border border-gray-200 dark:border-zinc-800 text-left">
+                        <h2 class="text-2xl font-bold mb-2">Panel Moderasi Akun Warga</h2>
+                        <p class="text-gray-500 text-sm mb-6">Blokir sementara atau permanen bagi akun yang melanggar aturan.</p>
+                        <div id="admin-user-list-container"></div>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <div id="notification-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center z-[80] p-4"></div>
+
+    <div id="form-modal" class="hidden fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-[60] p-4">
+        <div class="bg-white dark:bg-zinc-900 p-8 rounded-2xl w-full max-w-lg shadow-2xl text-left">
+            <h2 id="form-title" class="text-2xl font-bold mb-6">Tambah Data</h2>
+            <form onsubmit="submitForm(event)">
+                <input type="text" id="input-judul" required placeholder="Judul" class="w-full border p-3 mb-4 rounded-xl dark:bg-zinc-800 outline-none">
+                <div id="form-gambar-container" class="hidden"><input type="file" id="input-gambar" accept="image/*" class="w-full border p-2 mb-4 rounded-xl text-xs"></div>
+                <textarea id="input-konten" required placeholder="Konten" class="w-full border p-3 mb-6 rounded-xl h-32 resize-none dark:bg-zinc-800 outline-none"></textarea>
+                <div class="flex gap-4">
+                    <button type="submit" class="flex-1 bg-emerald-600 text-white font-bold py-3 rounded-xl shadow-md">Simpan</button>
+                    <button type="button" onclick="closeForm()" class="flex-1 bg-gray-200 dark:bg-zinc-700 font-bold py-3 rounded-xl">Batal</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
