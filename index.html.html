@@ -1,0 +1,1410 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>GeoCare - Earth & Environment Protection</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-app.js";
+        import { getAuth, GoogleAuthProvider, signInWithRedirect, getRedirectResult, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, deleteDoc, doc, updateDoc, setDoc, getDoc, getDocs, onSnapshot, arrayUnion, arrayRemove, query, where } from "https://www.gstatic.com/firebasejs/10.4.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyDZDZjIZsrtAkjukNhXaClUoPrl0cVyvW8",
+            authDomain: "geo-mengabdi.firebaseapp.com",
+            projectId: "geo-mengabdi",
+            storageBucket: "geo-mengabdi.appspot.com",
+            messagingSenderId: "713746496745",
+            appId: "1:713746496745:web:d8723beee8c70d56fac478",
+            measurementId: "G-N4CF0Z8N9D"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const provider = new GoogleAuthProvider();
+        
+        const LOGO_LOCAL = "logo.jpg";
+        const ADMIN_EMAIL = "admingeomengabdi@gmail.com";
+
+        window.currentUser = null;
+        window.isAdmin = false;
+        
+        let mapInstance = null; 
+        let analisisChartInstance = null;
+        let currentChatPartnerUid = null;
+        let chatUnsubscribe = null;
+        let myProfileUnsubscribe = null;
+        let userCoords = null;
+        let previousViewBeforeUser = 'view-beranda';
+
+        window.getEcoBadge = (grams) => {
+            const g = grams || 0;
+            if(g >= 100000) return { name: "Eco-Champion", icon: "🏆", style: "badge-blink bg-yellow-900/50 text-yellow-400 border border-yellow-400 shadow-[0_0_15px_rgba(250,204,21,0.7)]" };
+            if(g >= 50000) return { name: "Eco-Master", icon: "💎", style: "badge-blink bg-cyan-900/50 text-cyan-400 border border-cyan-400 shadow-[0_0_15px_rgba(34,211,238,0.7)]" };
+            if(g >= 20000) return { name: "Eco-Guardian", icon: "🛡️", style: "badge-blink bg-purple-900/50 text-purple-400 border border-purple-400 shadow-[0_0_15px_rgba(192,132,252,0.7)]" };
+            if(g >= 10000) return { name: "Eco-Ranger", icon: "⚔️", style: "badge-blink bg-red-900/50 text-red-400 border border-red-400 shadow-[0_0_15px_rgba(248,113,113,0.7)]" };
+            if(g >= 1000) return { name: "Eco-Novice", icon: "🌱", style: "badge-blink bg-emerald-900/50 text-emerald-400 border border-emerald-400 shadow-[0_0_15px_rgba(52,211,153,0.7)]" };
+            return { name: "Warga Pemula", icon: "👤", style: "bg-gray-800 text-gray-300 border border-gray-600" };
+        };
+
+        document.addEventListener("DOMContentLoaded", () => {
+            const btnLogin = document.getElementById('btn-login');
+            if(btnLogin) {
+                btnLogin.addEventListener('click', () => {
+                    // Menggunakan signInWithRedirect agar kompatibel penuh dengan Safari iOS
+                    signInWithRedirect(auth, provider).catch((error) => {
+                        showNotificationModal("Gagal Login", error.message, false);
+                    });
+                });
+            }
+
+            // Memeriksa hasil redirect dari Google Auth
+            getRedirectResult(auth).catch((error) => {
+                console.error("Redirect error:", error);
+            });
+        });
+
+        window.logout = () => {
+            signOut(auth).then(() => {
+                localStorage.removeItem('saved_user_uid');
+                location.reload();
+            });
+        };
+
+        onAuthStateChanged(auth, async (user) => {
+            try {
+                if (user) {
+                    window.currentUser = user;
+                    window.isAdmin = (user.email === ADMIN_EMAIL);
+                    
+                    if (navigator.geolocation) {
+                        navigator.geolocation.getCurrentPosition((pos) => {
+                            userCoords = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+                            updateDoc(doc(db, "users", user.uid), { coords: userCoords, lastActive: Date.now() }).catch(()=>{});
+                        }, () => {}, { enableHighAccuracy: false, timeout: 5000 });
+                    }
+
+                    const userDocRef = doc(db, "users", user.uid);
+                    const userSnap = await getDoc(userDocRef);
+
+                    if (userSnap.exists()) {
+                        const uData = userSnap.data();
+                        if (uData.statusBlokir && uData.statusBlokir !== 'aktif' && !window.isAdmin) {
+                            checkBannedStatus(uData);
+                            return;
+                        }
+                    } else {
+                        await setDoc(userDocRef, {
+                            uid: user.uid, email: user.email,
+                            nama: user.displayName || "Warga", username: user.email.split('@')[0].toLowerCase(),
+                            biodata: "Warga pemerhati lingkungan GeoCare.", fotoProfil: user.photoURL || LOGO_LOCAL,
+                            followers: [], following: [], pengikutRequests: [], isPrivate: false,
+                            statusBlokir: 'aktif', totalPartisipasi: 0
+                        }, { merge: true });
+                    }
+
+                    const loginScreen = document.getElementById('login-screen');
+                    if(loginScreen) loginScreen.classList.add('hidden');
+                    localStorage.setItem('saved_user_uid', user.uid);
+                    
+                    loadHomeFeedAndStories();
+                    loadInformasiPublik();
+                    loadMap();
+                    loadChatConversations();
+                    loadNotificationsListener();
+                    startMyProfileRealtimeSync();
+
+                    const usernameModal = document.getElementById('username-modal');
+                    const profileModal = document.getElementById('profile-modal');
+
+                    if (window.isAdmin) {
+                        showSplashThenMainApp();
+                    } else {
+                        if (!userSnap.exists() || !userSnap.data().username) {
+                            if(usernameModal) usernameModal.classList.remove('hidden');
+                        } else if (!localStorage.getItem('profileComplete_' + user.uid)) {
+                            if(profileModal) profileModal.classList.remove('hidden');
+                            if(document.getElementById('prof-email')) document.getElementById('prof-email').value = user.email;
+                        } else {
+                            showSplashThenMainApp();
+                        }
+                    }
+                } else {
+                    const savedUid = localStorage.getItem('saved_user_uid');
+                    if (!savedUid) {
+                        const loginScreen = document.getElementById('login-screen');
+                        const mainApp = document.getElementById('main-app');
+                        const splashScreen = document.getElementById('splash-screen');
+                        if(loginScreen) loginScreen.classList.remove('hidden');
+                        if(mainApp) mainApp.classList.add('hidden');
+                        if(splashScreen) splashScreen.classList.add('hidden');
+                    }
+                }
+            } catch (err) { console.error("Auth error:", err); }
+        });
+
+        window.closeNotificationModal = () => { 
+            const modal = document.getElementById('notification-modal'); 
+            if(modal) {
+                modal.classList.add('hidden');
+                modal.innerHTML = "";
+            }
+        };
+
+        function showSplashThenMainApp() { 
+            const loginScreen = document.getElementById('login-screen');
+            const splashScreen = document.getElementById('splash-screen');
+            if(loginScreen) loginScreen.classList.add('hidden'); 
+            if(splashScreen) splashScreen.classList.remove('hidden'); 
+        }
+
+        window.startAppFromSplash = () => { 
+            const splashScreen = document.getElementById('splash-screen');
+            if(splashScreen) splashScreen.classList.add('hidden'); 
+            showMainApp(); 
+        };
+
+        function checkBannedStatus(uData) {
+            const loginScreen = document.getElementById('login-screen');
+            const mainApp = document.getElementById('main-app');
+            const splashScreen = document.getElementById('splash-screen');
+            if(loginScreen) loginScreen.classList.add('hidden');
+            if(mainApp) mainApp.classList.add('hidden');
+            if(splashScreen) splashScreen.classList.add('hidden');
+            const bannedModal = document.getElementById('banned-modal');
+            const bannedText = document.getElementById('banned-reason-text');
+            if(!bannedModal || !bannedText) return;
+            bannedText.innerText = uData.statusBlokir === 'permanen' ? "Akun Anda diblokir secara PERMANEN." : "Akun Anda diblokir sementara.";
+            bannedModal.classList.remove('hidden');
+        }
+
+        window.saveUsername = async (e) => {
+            e.preventDefault();
+            const usernameInput = document.getElementById('input-username').value.trim().toLowerCase();
+            if (!usernameInput || !window.currentUser) return;
+
+            try {
+                await setDoc(doc(db, "users", window.currentUser.uid), {
+                    uid: window.currentUser.uid, email: window.currentUser.email,
+                    nama: window.currentUser.displayName || "Warga", username: usernameInput,
+                    biodata: "Warga pemerhati lingkungan GeoCare.", fotoProfil: window.currentUser.photoURL || LOGO_LOCAL,
+                    followers: [], following: [], pengikutRequests: [], isPrivate: false,
+                    statusBlokir: 'aktif', statusAktifHingga: 0, totalPartisipasi: 0
+                }, { merge: true });
+                const usernameModal = document.getElementById('username-modal');
+                const profileModal = document.getElementById('profile-modal');
+                if(usernameModal) usernameModal.classList.add('hidden');
+                if(profileModal) profileModal.classList.remove('hidden');
+            } catch (err) { alert(err.message); }
+        };
+
+        window.saveProfile = async (e) => {
+            e.preventDefault();
+            if (!window.currentUser) return;
+            const telepon = document.getElementById('prof-telepon').value.trim();
+            const alamat = document.getElementById('prof-alamat').value.trim();
+            const ttl = document.getElementById('prof-ttl').value.trim();
+            try {
+                await updateDoc(doc(db, "users", window.currentUser.uid), { telepon, alamat, ttl, statusBlokir: 'aktif' });
+                localStorage.setItem('profileComplete_' + window.currentUser.uid, 'true');
+                const profileModal = document.getElementById('profile-modal');
+                if(profileModal) profileModal.classList.add('hidden');
+                showSplashThenMainApp();
+            } catch(err) { alert(err.message); }
+        };
+
+        function showMainApp() {
+            const mainApp = document.getElementById('main-app');
+            if(mainApp) mainApp.classList.remove('hidden');
+            document.querySelectorAll('.admin-only').forEach(el => {
+                el.style.display = window.isAdmin ? 'flex' : 'none';
+            });
+
+            startMyProfileRealtimeSync();
+            loadHomeFeedAndStories();
+            loadInformasiPublik();
+            loadMap();
+            loadChatConversations();
+            loadNotificationsListener();
+
+            if (window.isAdmin) {
+                loadAdminPartisipasiList();
+                loadAdminPengajuanSetorList();
+            }
+            switchView('view-beranda', 'Beranda Sistem');
+        }
+
+        window.bukaModalGantiFoto = () => {
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `
+                <div class="glass-panel rounded-3xl w-full max-w-sm p-6 text-center animate-scale-up neon-border">
+                    <h3 class="text-xl font-bold text-white mb-3">Ganti Foto Profil</h3>
+                    <p class="text-xs text-gray-400 mb-4">Pilih foto dari galeri perangkat atau masukkan URL gambar.</p>
+                    <input type="file" id="input-file-foto" accept="image/*" class="w-full bg-black/40 border border-emerald-900/50 p-2 rounded-xl text-white text-xs mb-3 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-500 cursor-pointer">
+                    <input type="url" id="input-new-foto" placeholder="Atau tempel URL gambar..." class="w-full bg-black/40 border border-emerald-900/50 p-3 rounded-xl text-white text-sm outline-none mb-4">
+                    <div class="flex gap-2">
+                        <button onclick="closeNotificationModal()" class="flex-1 bg-gray-700 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer">Batal</button>
+                        <button onclick="prosesSimpanFotoProfil()" class="flex-1 bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer">Simpan Foto</button>
+                    </div>
+                </div>`;
+            modal.classList.remove('hidden');
+        };
+
+        window.prosesSimpanFotoProfil = async () => {
+            const fileInput = document.getElementById('input-file-foto');
+            const urlInput = document.getElementById('input-new-foto').value.trim();
+            if(!window.currentUser) return;
+
+            if (fileInput.files && fileInput.files[0]) {
+                const reader = new FileReader();
+                reader.onload = async function(e) {
+                    const base64Image = e.target.result;
+                    try {
+                        await updateDoc(doc(db, "users", window.currentUser.uid), { fotoProfil: base64Image });
+                        closeNotificationModal();
+                        showNotificationModal("Berhasil", "Foto profil berhasil diperbarui dari galeri.", true);
+                    } catch(err) { showNotificationModal("Gagal", err.message, false); }
+                };
+                reader.readAsDataURL(fileInput.files[0]);
+            } else if (urlInput) {
+                try {
+                    await updateDoc(doc(db, "users", window.currentUser.uid), { fotoProfil: urlInput });
+                    closeNotificationModal();
+                    showNotificationModal("Berhasil", "Foto profil berhasil diperbarui.", true);
+                } catch(e) { showNotificationModal("Gagal", e.message, false); }
+            } else {
+                alert("Pilih file gambar atau masukkan URL terlebih dahulu.");
+            }
+        };
+
+        window.toggleAccountPrivacy = async (checkbox) => {
+            if(!window.currentUser) return;
+            const isPrivate = checkbox.checked;
+            try {
+                await updateDoc(doc(db, "users", window.currentUser.uid), { isPrivate });
+                showNotificationModal("Pengaturan Privat", isPrivate ? "Akun Anda sekarang BERSIFAT PRIVAT. Pengikut baru memerlukan persetujuan." : "Akun Anda sekarang BERSIFAT PUBLIK.", true);
+            } catch(e) { alert(e.message); }
+        };
+
+        window.handleFollowAction = async (targetUid) => {
+            if(!window.currentUser || window.currentUser.uid === targetUid) return;
+            const myUid = window.currentUser.uid;
+
+            const targetSnap = await getDoc(doc(db, "users", targetUid));
+            if(!targetSnap.exists()) return;
+            const targetData = targetSnap.data();
+            const mySnap = await getDoc(doc(db, "users", myUid));
+            const myData = mySnap.data();
+
+            const isFollowing = (myData.following || []).includes(targetUid);
+            const isRequested = (targetData.pengikutRequests || []).includes(myUid);
+
+            if (isFollowing) {
+                await updateDoc(doc(db, "users", myUid), { following: arrayRemove(targetUid) });
+                await updateDoc(doc(db, "users", targetUid), { followers: arrayRemove(myUid) });
+                showNotificationModal("Berhasil", "Anda berhenti mengikuti pengguna ini.", true);
+            } else if (isRequested) {
+                await updateDoc(doc(db, "users", targetUid), { pengikutRequests: arrayRemove(myUid) });
+                showNotificationModal("Berhasil", "Permintaan mengikuti dibatalkan.", true);
+            } else {
+                if (targetData.isPrivate) {
+                    await updateDoc(doc(db, "users", targetUid), { pengikutRequests: arrayUnion(myUid) });
+                    await addDoc(collection(db, "notifikasi"), {
+                        recipientUid: targetUid,
+                        senderUid: myUid,
+                        senderName: myData.nama || window.currentUser.displayName || "Warga",
+                        type: "follow_request",
+                        message: `mengirimkan permintaan untuk mengikuti Anda.`,
+                        timestamp: Date.now(),
+                        read: false
+                    });
+                    showNotificationModal("Permintaan Dikirim", "Akun ini privat. Permintaan mengikuti telah dikirim.", true);
+                } else {
+                    await updateDoc(doc(db, "users", myUid), { following: arrayUnion(targetUid) });
+                    await updateDoc(doc(db, "users", targetUid), { followers: arrayUnion(myUid) });
+                    await addDoc(collection(db, "notifikasi"), {
+                        recipientUid: targetUid,
+                        senderUid: myUid,
+                        senderName: myData.nama || window.currentUser.displayName || "Warga",
+                        type: "follow",
+                        message: `mulai mengikuti Anda.`,
+                        timestamp: Date.now(),
+                        read: false
+                    });
+                    showNotificationModal("Berhasil", "Anda mulai mengikuti pengguna ini.", true);
+                }
+            }
+            openUserProfile(targetUid);
+        };
+
+        function loadNotificationsListener() {
+            if(!window.currentUser) return;
+            onSnapshot(query(collection(db, "notifikasi"), where("recipientUid", "==", window.currentUser.uid)), (snapshot) => {
+                const container = document.getElementById('notifikasi-container');
+                const badgeEl = document.getElementById('menu-notif-badge');
+                if(!container) return;
+                
+                let notifList = [];
+                snapshot.forEach(docSnap => {
+                    notifList.push({ id: docSnap.id, ...docSnap.data() });
+                });
+                notifList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+                let html = "";
+                let unreadCount = 0;
+                
+                notifList.forEach(notif => {
+                    if(!notif.read) unreadCount++;
+
+                    if(notif.type === 'follow_request') {
+                        html += `
+                            <div class="glass-panel p-4 rounded-2xl flex items-center justify-between mb-3 text-xs">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">📩</div>
+                                    <div><strong class="text-white">${notif.senderName || 'Warga'}</strong> <p class="text-gray-300">${notif.message}</p></div>
+                                </div>
+                                <div class="flex gap-2">
+                                    <button onclick="terimaPermintaanFollow('${notif.senderUid}', '${notif.id}')" class="bg-emerald-600 text-white font-bold px-3 py-2 rounded-xl cursor-pointer">Setuju</button>
+                                    <button onclick="tolakPermintaanFollow('${notif.senderUid}', '${notif.id}')" class="bg-red-600/80 text-white font-bold px-3 py-2 rounded-xl cursor-pointer">Tolak</button>
+                                </div>
+                            </div>`;
+                    } else {
+                        html += `
+                            <div class="glass-panel p-4 rounded-2xl flex items-center justify-between mb-3 text-xs">
+                                <div class="flex items-center gap-3">
+                                    <div class="w-10 h-10 rounded-full bg-cyan-500/20 text-cyan-400 flex items-center justify-center font-bold">🔔</div>
+                                    <div><strong class="text-white">${notif.senderName || 'Warga'}</strong> <p class="text-gray-300">${notif.message}</p></div>
+                                </div>
+                                <button onclick="tandaiNotifDibaca('${notif.id}')" class="text-gray-400 hover:text-white cursor-pointer">✕</button>
+                            </div>`;
+                    }
+                });
+
+                if(badgeEl) {
+                    badgeEl.innerText = unreadCount;
+                    badgeEl.style.display = unreadCount > 0 ? 'inline-block' : 'none';
+                }
+                container.innerHTML = html || `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada notifikasi baru.</p>`;
+            });
+        }
+
+        window.terimaPermintaanFollow = async (senderUid, notifId) => {
+            const myUid = window.currentUser.uid;
+            try {
+                await updateDoc(doc(db, "users", myUid), {
+                    followers: arrayUnion(senderUid),
+                    pengikutRequests: arrayRemove(senderUid)
+                });
+                await updateDoc(doc(db, "users", senderUid), { following: arrayUnion(myUid) });
+                await deleteDoc(doc(db, "notifikasi", notifId));
+                showNotificationModal("Sukses", "Permintaan mengikuti disetujui.", true);
+            } catch(e) { alert(e.message); }
+        };
+
+        window.tolakPermintaanFollow = async (senderUid, notifId) => {
+            const myUid = window.currentUser.uid;
+            try {
+                await updateDoc(doc(db, "users", myUid), { pengikutRequests: arrayRemove(senderUid) });
+                await deleteDoc(doc(db, "notifikasi", notifId));
+                showNotificationModal("Ditolak", "Permintaan mengikuti ditolak.", true);
+            } catch(e) { alert(e.message); }
+        };
+
+        window.tandaiNotifDibaca = async (notifId) => {
+            await deleteDoc(doc(db, "notifikasi", notifId));
+        };
+
+        window.handleLiveSearchUser = async (event) => {
+            const keyword = event.target.value.trim().toLowerCase();
+            const resultContainer = document.getElementById('hasil-pencarian-user-container');
+            if(!resultContainer) return;
+
+            if(!keyword) {
+                resultContainer.innerHTML = "";
+                return;
+            }
+
+            const snap = await getDocs(collection(db, "users"));
+            let html = "";
+            snap.forEach(d => {
+                const u = d.data();
+                const uname = (u.username || "").toLowerCase();
+                const nama = (u.nama || "").toLowerCase();
+                
+                if((uname.includes(keyword) || nama.includes(keyword)) && u.email !== ADMIN_EMAIL) {
+                    html += `
+                        <div class="glass-panel p-3 rounded-2xl flex items-center justify-between mb-2">
+                            <div class="flex items-center gap-3 cursor-pointer" onclick="openUserProfile('${u.uid}')">
+                                <img src="${u.fotoProfil || LOGO_LOCAL}" class="w-10 h-10 rounded-full object-cover">
+                                <div><h4 class="font-bold text-sm text-white">${u.nama}</h4><p class="text-xs text-emerald-400">@${u.username}</p></div>
+                            </div>
+                            <button onclick="openChatRoom('${u.uid}', '${u.nama}', '${u.fotoProfil}')" class="bg-emerald-600 text-white text-xs px-3 py-2 rounded-xl font-bold cursor-pointer">Chat</button>
+                        </div>`;
+                }
+            });
+            resultContainer.innerHTML = html || `<p class="text-xs text-gray-400 italic">Tidak ditemukan warga dengan kemiripan "${keyword}".</p>`;
+        };
+
+        function hitungJarakMeter(lat1, lon1, lat2, lon2) {
+            const R = 6371e3;
+            const φ1 = lat1 * Math.PI/180;
+            const φ2 = lat2 * Math.PI/180;
+            const Δφ = (lat2-lat1) * Math.PI/180;
+            const Δλ = (lon2-lon1) * Math.PI/180;
+
+            const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                      Math.cos(φ1) * Math.cos(φ2) *
+                      Math.sin(Δλ/2) * Math.sin(Δλ/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c; 
+        }
+
+        window.cariWargaDalamRadius100m = async () => {
+            const resultContainer = document.getElementById('hasil-pencarian-user-container');
+            if(!resultContainer) return;
+
+            if(!userCoords) {
+                resultContainer.innerHTML = `<p class="text-xs text-yellow-400 italic">GPS Anda belum terdeteksi. Izinkan akses lokasi pada browser Anda.</p>`;
+                return;
+            }
+
+            resultContainer.innerHTML = `<p class="text-xs text-emerald-400 animate-pulse py-2">Mencari warga di sekitar (radius 100 meter)...</p>`;
+            const snap = await getDocs(collection(db, "users"));
+            let html = "";
+            let foundCount = 0;
+
+            snap.forEach(d => {
+                const u = d.data();
+                if(u.uid !== window.currentUser.uid && u.email !== ADMIN_EMAIL && u.coords) {
+                    const jarak = hitungJarakMeter(userCoords.lat, userCoords.lng, u.coords.lat, u.coords.lng);
+                    if(jarak <= 100) {
+                        foundCount++;
+                        html += `
+                            <div class="glass-panel p-3 rounded-2xl flex items-center justify-between mb-2">
+                                <div class="flex items-center gap-3 cursor-pointer" onclick="openUserProfile('${u.uid}')">
+                                    <img src="${u.fotoProfil || LOGO_LOCAL}" class="w-10 h-10 rounded-full object-cover">
+                                    <div><h4 class="font-bold text-sm text-white">${u.nama}</h4><p class="text-xs text-emerald-400">@${u.username} • <span class="text-yellow-400 font-bold">${Math.round(jarak)} meter dari Anda</span></p></div>
+                                </div>
+                                <button onclick="openChatRoom('${u.uid}', '${u.nama}', '${u.fotoProfil}')" class="bg-emerald-600 text-white text-xs px-3 py-2 rounded-xl font-bold cursor-pointer">Chat</button>
+                            </div>`;
+                    }
+                }
+            });
+
+            resultContainer.innerHTML = foundCount > 0 ? html : `<p class="text-xs text-gray-400 italic">Tidak ada warga lain dalam radius 100 meter saat ini.</p>`;
+        };
+
+        window.handleStoryClick = async (targetUid) => {
+            const snap = await getDoc(doc(db, "users", targetUid));
+            if(!snap.exists()) return;
+            const uData = snap.data();
+            const now = Date.now();
+            const hasActiveStatus = uData.statusAktifHingga && uData.statusAktifHingga > now;
+
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+
+            modal.innerHTML = `
+                <div class="glass-panel rounded-3xl w-full max-w-sm p-6 text-center animate-scale-up neon-border">
+                    <img src="${uData.fotoProfil || LOGO_LOCAL}" class="w-16 h-16 rounded-full object-cover mx-auto mb-3 border-2 border-emerald-500">
+                    <h3 class="text-lg font-bold text-white mb-1">${uData.nama}</h3>
+                    <p class="text-xs text-emerald-400 mb-6">@${uData.username || 'warga'}</p>
+                    <div class="space-y-2">
+                        ${hasActiveStatus ? `<button onclick="openStatusViewer('${targetUid}')" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-xl text-xs cursor-pointer">📸 Lihat Status Cerita</button>` : `<p class="text-xs text-gray-400 italic mb-3">Warga ini belum membuat status aktif.</p>`}
+                        <button onclick="closeNotificationModal(); openUserProfile('${targetUid}')" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 rounded-xl text-xs cursor-pointer">👤 Lihat Profil Pengguna</button>
+                        <button onclick="closeNotificationModal()" class="w-full bg-gray-700 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer">Batal</button>
+                    </div>
+                </div>`;
+            modal.classList.remove('hidden');
+        };
+
+        window.openStatusViewer = async (targetUid) => {
+            const snap = await getDoc(doc(db, "users", targetUid));
+            if(!snap.exists()) return;
+            const data = snap.data();
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `
+                <div class="glass-panel rounded-3xl w-full max-w-md p-6 text-center animate-scale-up neon-border relative">
+                    <div class="flex items-center gap-3 mb-4 text-left">
+                        <img src="${data.fotoProfil || LOGO_LOCAL}" class="w-10 h-10 rounded-full object-cover p-0.5 story-ring">
+                        <div><h4 class="font-bold text-white text-sm">${data.nama}</h4><p class="text-[10px] text-emerald-400">Cerita Warga</p></div>
+                    </div>
+                    <div class="rounded-2xl overflow-hidden bg-black mb-4 max-h-96 flex items-center justify-center border border-gray-700">
+                        <img src="${data.statusMediaUrl}" class="w-full h-auto max-h-96 object-cover">
+                    </div>
+                    <button onclick="closeNotificationModal()" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl text-xs cursor-pointer">Tutup</button>
+                </div>`;
+            modal.classList.remove('hidden');
+        };
+
+        window.openUserProfile = async (targetUid) => {
+            if (!window.currentUser) return;
+            switchView('view-user-profile', 'Profil Warga');
+            const targetSnap = await getDoc(doc(db, "users", targetUid));
+            if (!targetSnap.exists()) return;
+            const tData = targetSnap.data();
+            
+            const mySnap = await getDoc(doc(db, "users", window.currentUser.uid));
+            const myData = mySnap.data();
+
+            document.getElementById('other-profile-img').src = tData.fotoProfil || LOGO_LOCAL;
+            document.getElementById('other-profile-name').innerText = tData.nama;
+            document.getElementById('other-profile-username').innerText = "@" + (tData.username || "-");
+            document.getElementById('other-profile-bio').innerText = tData.biodata || "Warga GeoCare.";
+            
+            const totalGram = tData.totalPartisipasi || 0;
+            document.getElementById('other-total-gram').innerText = totalGram.toLocaleString('id-ID');
+            document.getElementById('other-followers-count').innerText = (tData.followers || []).length;
+            document.getElementById('other-following-count').innerText = (tData.following || []).length;
+
+            const badge = window.getEcoBadge(totalGram);
+            document.getElementById('other-eco-badge').innerHTML = `<span class="${badge.style} px-3 py-1 rounded-full text-xs font-bold inline-flex items-center gap-1">${badge.icon} ${badge.name}</span>`;
+
+            const btnFollow = document.getElementById('btn-other-follow');
+            const isFollowing = (myData.following || []).includes(targetUid);
+            const isRequested = (tData.pengikutRequests || []).includes(window.currentUser.uid);
+
+            if(targetUid === window.currentUser.uid) {
+                btnFollow.style.display = 'none';
+            } else {
+                btnFollow.style.display = 'block';
+                if(isFollowing) {
+                    btnFollow.innerText = "Mengikuti";
+                    btnFollow.className = "w-full bg-gray-700 hover:bg-gray-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer";
+                } else if(isRequested) {
+                    btnFollow.innerText = "Diminta";
+                    btnFollow.className = "w-full bg-yellow-600/50 border border-yellow-400 text-yellow-300 font-bold py-2.5 rounded-xl text-xs cursor-pointer";
+                } else {
+                    btnFollow.innerText = tData.isPrivate ? "Kirim Permintaan" : "Ikuti";
+                    btnFollow.className = "w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer";
+                }
+                btnFollow.onclick = () => window.handleFollowAction(targetUid);
+            }
+
+            const restrictedSection = document.getElementById('other-restricted-section');
+            if (tData.isPrivate && !isFollowing && targetUid !== window.currentUser.uid) {
+                restrictedSection.innerHTML = `<p class="text-xs text-yellow-400 italic py-4">Akun ini bersifat privat. Ikuti akun ini untuk melihat detail aktivitas dan postingan.</p>`;
+            } else {
+                restrictedSection.innerHTML = "";
+            }
+        };
+
+        window.goBackFromUserProfile = () => { switchView(previousViewBeforeUser, 'Beranda Sistem'); };
+
+        window.ajukanSetorSampahWarga = async () => {
+            if(!window.currentUser) return;
+            try {
+                const userSnap = await getDoc(doc(db, "users", window.currentUser.uid));
+                const userData = userSnap.exists() ? userSnap.data() : {};
+                await addDoc(collection(db, "pengajuan_partisipasi"), {
+                    uid: window.currentUser.uid,
+                    nama: userData.nama || window.currentUser.displayName || "Warga",
+                    username: userData.username || "warga",
+                    status: "Menunggu",
+                    timestamp: Date.now()
+                });
+                showNotificationModal("Berhasil", "Permintaan setor sampah dikirim. Silakan tunggu verifikasi admin.", true);
+            } catch(err) { showNotificationModal("Gagal", err.message, false); }
+        };
+
+        function loadAdminPengajuanSetorList() {
+            onSnapshot(collection(db, "pengajuan_partisipasi"), (snapshot) => {
+                const container = document.getElementById('admin-pengajuan-setor-container');
+                if(!container) return;
+                container.innerHTML = "";
+                let hasData = false;
+
+                snapshot.forEach(docSnap => {
+                    const item = docSnap.data();
+                    hasData = true;
+                    container.innerHTML += `
+                        <div class="glass-panel p-3 rounded-xl flex items-center justify-between text-xs mb-2">
+                            <div><strong class="text-white">${item.nama} (@${item.username})</strong><p class="text-emerald-400">Mengajukan Setor Sampah</p></div>
+                            <div class="flex gap-2">
+                                <button onclick="bukaModalInputGramAdmin('${item.uid}', '${item.nama}', '${docSnap.id}')" class="bg-emerald-600 text-white px-3 py-1.5 rounded-xl font-bold cursor-pointer">Verifikasi</button>
+                                <button onclick="bukaPopUpHapusVerifikasi('${docSnap.id}', '${item.nama}')" class="bg-red-600/80 text-white px-3 py-1.5 rounded-xl font-bold cursor-pointer">Hapus</button>
+                            </div>
+                        </div>`;
+                });
+                if(!hasData) container.innerHTML = `<p class="text-xs text-gray-400 italic">Belum ada pengajuan setor sampah dari warga.</p>`;
+            });
+        }
+
+        window.bukaPopUpHapusVerifikasi = (pengajuanId, wargaNama) => {
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `
+                <div class="glass-panel rounded-3xl w-full max-w-sm p-6 text-center animate-scale-up border border-red-500/50 shadow-[0_0_25px_rgba(239,68,68,0.3)]">
+                    <div class="w-16 h-16 bg-red-500/20 text-red-400 rounded-full flex items-center justify-center text-3xl mx-auto mb-4 border border-red-500">🗑️</div>
+                    <h3 class="text-xl font-extrabold text-white mb-2">Hapus Pengajuan Verifikasi?</h3>
+                    <p class="text-xs text-gray-300 mb-6">Tindakan ini akan menghapus pesan pengajuan setor sampah dari <b>${wargaNama}</b> secara permanen.</p>
+                    <div class="flex gap-2">
+                        <button onclick="closeNotificationModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 rounded-xl text-xs cursor-pointer">Batal</button>
+                        <button onclick="eksekusiHapusVerifikasi('${pengajuanId}')" class="flex-1 bg-red-600 hover:bg-red-500 text-white font-bold py-3 rounded-xl text-xs cursor-pointer">Ya, Hapus</button>
+                    </div>
+                </div>`;
+            modal.classList.remove('hidden');
+        };
+
+        window.eksekusiHapusVerifikasi = async (pengajuanId) => {
+            try {
+                await deleteDoc(doc(db, "pengajuan_partisipasi", pengajuanId));
+                closeNotificationModal();
+                showNotificationModal("Berhasil Dihapus", "Permintaan verifikasi berhasil dibersihkan dari daftar.", true);
+            } catch(e) { alert(e.message); }
+        };
+
+        function loadAdminPartisipasiList() {
+            onSnapshot(collection(db, "users"), (snapshot) => {
+                const container = document.getElementById('admin-partisipasi-warga-container');
+                if(!container) return;
+                container.innerHTML = "";
+                snapshot.forEach(docSnap => {
+                    const u = docSnap.data();
+                    if(u.email !== ADMIN_EMAIL) {
+                        container.innerHTML += `
+                            <div class="glass-panel p-4 rounded-2xl flex items-center justify-between mb-2 text-left">
+                                <div class="flex items-center gap-3">
+                                    <img src="${u.fotoProfil || LOGO_LOCAL}" class="w-10 h-10 rounded-full object-cover">
+                                    <div><h4 class="font-bold text-sm text-white">${u.nama} (@${u.username || '-'})</h4><p class="text-xs text-emerald-400">Total: ${u.totalPartisipasi || 0} Gram</p></div>
+                                </div>
+                                <div class="flex gap-2">
+                                    <button onclick="bukaModalInputGramAdmin('${u.uid}', '${u.nama}', null)" class="bg-emerald-600 text-white font-bold px-3 py-2 rounded-xl text-xs cursor-pointer">Upgrade</button>
+                                    <button onclick="bukaPopUpResetPoin('${u.uid}', '${u.nama}')" class="bg-red-600/80 text-white font-bold px-3 py-2 rounded-xl text-xs cursor-pointer">Reset Poin</button>
+                                </div>
+                            </div>`;
+                    }
+                });
+            });
+        }
+
+        window.bukaPopUpResetPoin = (targetUid, targetName) => {
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `
+                <div class="glass-panel rounded-3xl w-full max-w-sm p-6 text-center animate-scale-up border border-yellow-500/50 shadow-[0_0_25px_rgba(234,179,8,0.3)]">
+                    <div class="w-16 h-16 bg-yellow-500/20 text-yellow-400 rounded-full flex items-center justify-center text-3xl mx-auto mb-4 border border-yellow-500">⚠️</div>
+                    <h3 class="text-xl font-extrabold text-white mb-2">Reset Poin Warga?</h3>
+                    <p class="text-xs text-gray-300 mb-6">Poin partisipasi milik <b>${targetName}</b> akan diatur ulang menjadi <b>0 Gram</b> secara permanen.</p>
+                    <div class="flex gap-2">
+                        <button onclick="closeNotificationModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 rounded-xl text-xs cursor-pointer">Batal</button>
+                        <button onclick="eksekusiResetPoin('${targetUid}')" class="flex-1 bg-yellow-600 hover:bg-yellow-500 text-white font-bold py-3 rounded-xl text-xs cursor-pointer">Ya, Reset</button>
+                    </div>
+                </div>`;
+            modal.classList.remove('hidden');
+        };
+
+        window.eksekusiResetPoin = async (targetUid) => {
+            try {
+                await updateDoc(doc(db, "users", targetUid), { totalPartisipasi: 0 });
+                closeNotificationModal();
+                showNotificationModal("Reset Berhasil", "Total poin partisipasi warga berhasil direset ke 0 Gram.", true);
+                loadLeaderboardMingguan();
+            } catch(e) { alert(e.message); }
+        };
+
+        window.bukaModalInputGramAdmin = (targetUid, targetName, pengajuanId) => {
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `
+                <div class="glass-panel rounded-3xl w-full max-w-sm p-6 text-center animate-scale-up neon-border">
+                    <h3 class="text-xl font-bold text-white mb-2">Input Sampah Warga</h3>
+                    <p class="text-xs text-gray-300 mb-4">Warga: <b>${targetName}</b></p>
+                    <input type="number" id="input-gram-tambahan" placeholder="Jumlah (Gram)" class="w-full bg-black/40 border p-3 rounded-xl text-white text-sm outline-none mb-4">
+                    <div class="flex gap-2">
+                        <button onclick="closeNotificationModal()" class="flex-1 bg-gray-700 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer">Batal</button>
+                        <button onclick="simpanUpgradePartisipasi('${targetUid}', '${pengajuanId || ''}')" class="flex-1 bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer">Simpan & Sinkronkan</button>
+                    </div>
+                </div>`;
+            modal.classList.remove('hidden');
+        };
+
+        window.simpanUpgradePartisipasi = async (targetUid, pengajuanId) => {
+            const gramTambahan = parseInt(document.getElementById('input-gram-tambahan').value);
+            if(isNaN(gramTambahan) || gramTambahan <= 0) { alert("Jumlah tidak valid."); return; }
+
+            try {
+                await addDoc(collection(db, "riwayat_partisipasi"), { uid: targetUid, gram: gramTambahan, timestamp: Date.now() });
+                const userRef = doc(db, "users", targetUid);
+                const userSnap = await getDoc(userRef);
+                let newTotal = (userSnap.exists() && userSnap.data().totalPartisipasi ? userSnap.data().totalPartisipasi : 0) + gramTambahan;
+                await updateDoc(userRef, { totalPartisipasi: newTotal });
+
+                const analisisRef = doc(db, "pengaturan_analisis", "data_utama");
+                const analisisSnap = await getDoc(analisisRef);
+                let currentGram = analisisSnap.exists() ? (analisisSnap.data().totalGram || 1250000) : 1250000;
+                await setDoc(analisisRef, { totalGram: currentGram + gramTambahan, updatedAt: Date.now() }, { merge: true });
+
+                if(pengajuanId && pengajuanId !== 'null' && pengajuanId !== '') {
+                    await deleteDoc(doc(db, "pengajuan_partisipasi", pengajuanId));
+                }
+
+                closeNotificationModal();
+                showNotificationModal("Sinkronisasi Sukses", `Berhasil menambah ${gramTambahan} gram. Data Analisis & Leaderboard diperbarui!`, true);
+                loadLeaderboardMingguan();
+            } catch(e) { showNotificationModal("Gagal", e.message, false); }
+        };
+
+        window.loadLeaderboardMingguan = async () => {
+            const container = document.getElementById('leaderboard-container');
+            if(!container) return;
+            container.innerHTML = `<p class="text-center text-emerald-400 animate-pulse text-xs py-4">Memuat peringkat 7 hari terakhir...</p>`;
+            
+            const tujuhHariLalu = Date.now() - (7 * 24 * 60 * 60 * 1000);
+            const snap = await getDocs(query(collection(db, "riwayat_partisipasi"), where("timestamp", ">=", tujuhHariLalu)));
+
+            let rankingMap = {};
+            snap.forEach(d => {
+                const data = d.data();
+                if(!rankingMap[data.uid]) rankingMap[data.uid] = 0;
+                rankingMap[data.uid] += data.gram;
+            });
+
+            const sortedRanking = Object.entries(rankingMap).sort((a, b) => b[1] - a[1]);
+            if(sortedRanking.length === 0) {
+                container.innerHTML = `<div class="glass-panel p-6 text-center text-gray-400 rounded-2xl text-xs">Belum ada penyetoran dalam 7 hari terakhir.</div>`;
+                return;
+            }
+
+            let html = "";
+            for (let i = 0; i < sortedRanking.length; i++) {
+                const [uid, totalGram] = sortedRanking[i];
+                const userSnap = await getDoc(doc(db, "users", uid));
+                const uData = userSnap.exists() ? userSnap.data() : { nama: "Warga", username: "anonim", fotoProfil: LOGO_LOCAL };
+                let rankBadge = i === 0 ? "🥇" : (i === 1 ? "🥈" : (i === 2 ? "🥉" : `#${i+1}`));
+
+                html += `
+                    <div class="glass-panel flex items-center justify-between p-4 rounded-2xl mb-3">
+                        <div class="flex items-center gap-3 cursor-pointer" onclick="openUserProfile('${uid}')">
+                            <div class="w-8 text-center font-bold text-lg">${rankBadge}</div>
+                            <img src="${uData.fotoProfil || LOGO_LOCAL}" class="w-10 h-10 rounded-full object-cover">
+                            <div><h4 class="font-bold text-white text-sm">${uData.nama}</h4><p class="text-[10px] text-emerald-400">@${uData.username || '-'}</p></div>
+                        </div>
+                        <div class="text-right">
+                            <span class="block text-base font-extrabold text-emerald-400">${totalGram.toLocaleString('id-ID')} Gram</span>
+                            <span class="text-[9px] text-gray-400 uppercase font-bold">7 Hari Terakhir</span>
+                        </div>
+                    </div>`;
+            }
+            container.innerHTML = html;
+        };
+
+        function loadMap() {
+            const mapContainer = document.getElementById('map');
+            if (!mapContainer) return;
+            if (!mapInstance) {
+                mapInstance = L.map('map', { zoomControl: true, tap: true }).setView([-0.502106, 117.153709], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(mapInstance);
+                mapInstance.on('click', (e) => {
+                    if (!window.isAdmin) return;
+                    const lat = e.latlng.lat, lng = e.latlng.lng;
+                    const modal = document.getElementById('notification-modal');
+                    if(!modal) return;
+                    modal.innerHTML = `
+                        <div class="glass-panel rounded-3xl w-full max-w-sm p-6 text-left animate-scale-up neon-border">
+                            <h3 class="text-xl font-bold text-white mb-2">Tambah Titik Peta Baru</h3>
+                            <form onsubmit="simpanTitikKlikPeta(event, ${lat}, ${lng})">
+                                <input type="text" id="klik-peta-nama" required placeholder="Nama Lokasi" class="w-full bg-black/40 border p-3 rounded-xl text-white text-sm outline-none mb-3">
+                                <input type="text" id="klik-peta-kode" required placeholder="Kode Titik (Cth: BS-001)" class="w-full bg-black/40 border p-3 rounded-xl text-white text-sm outline-none mb-4">
+                                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs cursor-pointer">Simpan</button>
+                            </form>
+                        </div>`;
+                    modal.classList.remove('hidden');
+                });
+            } else { mapInstance.invalidateSize(); }
+            muatSemuaMarkerPeta();
+        }
+
+        window.simpanTitikKlikPeta = async (e, lat, lng) => {
+            e.preventDefault();
+            const nama = document.getElementById('klik-peta-nama').value.trim();
+            const kode = document.getElementById('klik-peta-kode').value.trim();
+            if(!nama || !kode) return;
+            await addDoc(collection(db, "lokasi_peta"), { nama, kode, lat, lng, timestamp: Date.now() });
+            closeNotificationModal(); loadMap();
+        };
+
+        function muatSemuaMarkerPeta() {
+            if (!mapInstance) return;
+            getDocs(collection(db, "lokasi_peta")).then(snap => {
+                snap.forEach(docSnap => {
+                    const item = docSnap.data();
+                    L.marker([item.lat, item.lng]).addTo(mapInstance).bindPopup(`<b>${item.nama}</b><br><b>Kode: ${item.kode || '-'}</b>`);
+                });
+            });
+        }
+
+        window.cariLokasiBankSampah = async () => {
+            const keyword = document.getElementById('input-cari-lokasi').value.trim().toLowerCase();
+            const resultBox = document.getElementById('hasil-cari-lokasi-container');
+            if(!keyword || !resultBox) return;
+            const snap = await getDocs(collection(db, "lokasi_peta"));
+            let html = "";
+            snap.forEach(docSnap => {
+                const item = docSnap.data();
+                if((item.nama || "").toLowerCase().includes(keyword) || (item.kode || "").toLowerCase().includes(keyword)) {
+                    html += `
+                        <div class="glass-panel p-3 rounded-2xl flex items-center justify-between mb-2">
+                            <div><h4 class="font-bold text-white text-sm">${item.nama}</h4><p class="text-xs text-emerald-400">Kode: ${item.kode}</p></div>
+                            <button onclick="mapInstance.setView([${item.lat}, ${item.lng}], 16); switchView('view-peta', 'Peta Bank Sampah');" class="bg-emerald-600 text-white text-xs px-3 py-2 rounded-xl font-bold cursor-pointer">Peta</button>
+                        </div>`;
+                }
+            });
+            resultBox.innerHTML = html || `<p class="text-xs text-gray-400 italic">Tidak ditemukan.</p>`;
+        };
+
+        function loadInformasiPublik() {
+            onSnapshot(collection(db, "informasi_publik"), (snapshot) => {
+                const container = document.getElementById('informasi-publik-container');
+                if(!container) return;
+                let html = "";
+                snapshot.forEach(d => {
+                    const item = d.data();
+                    html += `<div class="glass-panel p-4 rounded-2xl mb-3 text-left"><h4 class="font-bold text-white text-sm">${item.judul}</h4><p class="text-xs text-gray-300 mt-1">${item.isi}</p></div>`;
+                });
+                container.innerHTML = html || `<p class="text-xs text-gray-400 italic">Belum ada pengumuman.</p>`;
+            });
+        }
+
+        window.loadAnalisisData = () => {
+            const ctx = document.getElementById('analisisChart');
+            if(!ctx) return;
+            if(analisisChartInstance) analisisChartInstance.destroy();
+            onSnapshot(doc(db, "pengaturan_analisis", "data_utama"), (docSnap) => {
+                const data = docSnap.exists() ? docSnap.data() : { totalGram: 1250000, wargaAktif: 342, targetPersen: 75 };
+                analisisChartInstance = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: ['Sen', 'Sel', 'Rab', 'Kam', 'Jum', 'Sab', 'Min'],
+                        datasets: [{ label: 'Total Sampah Didaur Ulang (Gram)', data: [12000, 19000, 15000, 25000, 22000, 30000, data.totalGram / 30], borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.2)', borderWidth: 3, fill: true, tension: 0.4 }]
+                    },
+                    options: { responsive: true, maintainAspectRatio: false, scales: { y: { ticks: { color: '#9ca3af' } }, x: { ticks: { color: '#9ca3af' } } } }
+                });
+                const publishBox = document.getElementById('analisis-publish-container');
+                if(publishBox) {
+                    publishBox.innerHTML = `
+                        <div class="glass-panel p-4 rounded-2xl text-center"><p class="text-xs text-gray-400 uppercase">Total Sampah Kota</p><p class="text-2xl font-extrabold text-emerald-400 neon-text mt-1">${data.totalGram.toLocaleString('id-ID')} Gram</p></div>
+                        <div class="glass-panel p-4 rounded-2xl text-center"><p class="text-xs text-gray-400 uppercase">Warga Aktif</p><p class="text-2xl font-extrabold text-cyan-400 mt-1">${data.wargaAktif.toLocaleString('id-ID')} Orang</p></div>
+                        <div class="glass-panel p-4 rounded-2xl text-center"><p class="text-xs text-gray-400 uppercase">Target Bulanan</p><p class="text-2xl font-extrabold text-yellow-400 mt-1">${data.targetPersen}%</p></div>
+                    `;
+                }
+            });
+        };
+
+        window.simpanAnalisisAdmin = async (e) => {
+            e.preventDefault();
+            const totalGram = parseFloat(document.getElementById('input-analisis-total').value);
+            const wargaAktif = parseInt(document.getElementById('input-analisis-warga').value);
+            const targetPersen = parseInt(document.getElementById('input-analisis-target').value);
+            await setDoc(doc(db, "pengaturan_analisis", "data_utama"), { totalGram, wargaAktif, targetPersen, updatedAt: Date.now() });
+            showNotificationModal("Sukses", "Data analisis diperbarui.", true);
+        };
+
+        function startMyProfileRealtimeSync() {
+            if (window.isAdmin || !window.currentUser) return;
+            if (myProfileUnsubscribe) myProfileUnsubscribe();
+
+            myProfileUnsubscribe = onSnapshot(doc(db, "users", window.currentUser.uid), (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const nameEl = document.getElementById('my-profile-name');
+                    const unameEl = document.getElementById('my-profile-username');
+                    const bioEl = document.getElementById('my-profile-bio');
+                    const imgEl = document.getElementById('my-profile-img');
+                    const totalGramEl = document.getElementById('my-total-gram');
+                    const followersEl = document.getElementById('my-followers-count');
+                    const followingEl = document.getElementById('my-following-count');
+                    const privacyToggle = document.getElementById('account-privacy-toggle');
+                    const badgeContainer = document.getElementById('my-eco-badge');
+
+                    if(nameEl) nameEl.innerText = data.nama || "Warga";
+                    if(unameEl) unameEl.innerText = "@" + (data.username || "-");
+                    if(bioEl) bioEl.innerText = data.biodata || "Warga pemerhati lingkungan GeoCare.";
+                    if(imgEl) imgEl.src = data.fotoProfil || LOGO_LOCAL;
+                    
+                    const totalGram = data.totalPartisipasi || 0;
+                    if(totalGramEl) totalGramEl.innerText = totalGram.toLocaleString('id-ID');
+                    if(followersEl) followersEl.innerText = (data.followers || []).length;
+                    if(followingEl) followingEl.innerText = (data.following || []).length;
+
+                    if(privacyToggle) privacyToggle.checked = !!data.isPrivate;
+                    
+                    if(badgeContainer) {
+                        const badge = window.getEcoBadge(totalGram);
+                        badgeContainer.innerHTML = `<span class="${badge.style} px-3 py-1 rounded-full text-xs font-bold inline-flex items-center gap-1">${badge.icon} ${badge.name}</span>`;
+                    }
+                }
+            });
+        }
+
+        window.openCustomerServiceAdmin = async () => {
+            const snap = await getDocs(query(collection(db, "users"), where("email", "==", ADMIN_EMAIL)));
+            let adminUid = "";
+            snap.forEach(d => adminUid = d.id);
+            if(adminUid) openChatRoom(adminUid, "Admin GeoCare", LOGO_LOCAL);
+        };
+
+        function loadChatConversations() {
+            if (!window.currentUser) return;
+            onSnapshot(collection(db, "chats"), (snapshot) => {
+                const listEl = document.getElementById('chat-user-list');
+                const menuBadge = document.getElementById('menu-chat-badge');
+                if(!listEl) return;
+                listEl.innerHTML = "";
+                let totalUnreadGlobal = 0;
+                snapshot.forEach(async (chatDoc) => {
+                    const chatId = chatDoc.id;
+                    if (chatId.includes(window.currentUser.uid)) {
+                        const uids = chatId.split('_');
+                        const partnerUid = uids[0] === window.currentUser.uid ? uids[1] : uids[0];
+                        const partnerSnap = await getDoc(doc(db, "users", partnerUid));
+                        if(partnerSnap.exists()) {
+                            const partnerData = partnerSnap.data();
+                            onSnapshot(query(collection(db, "chats", chatId, "pesan")), (msgSnap) => {
+                                let unreadCount = 0;
+                                msgSnap.forEach(m => { if(m.data().sender !== window.currentUser.uid && !m.data().dibaca) unreadCount++; });
+                                if(unreadCount > 0) totalUnreadGlobal += unreadCount;
+                                if(menuBadge) { menuBadge.innerText = totalUnreadGlobal; menuBadge.style.display = totalUnreadGlobal > 0 ? 'inline-block' : 'none'; }
+                            });
+                            listEl.innerHTML += `
+                                <div onclick="openChatRoom('${partnerUid}', '${partnerData.nama}', '${partnerData.fotoProfil}')" class="glass-panel p-4 rounded-2xl flex items-center justify-between cursor-pointer hover:border-emerald-500 transition mb-2">
+                                    <div class="flex items-center gap-3">
+                                        <img src="${partnerData.fotoProfil || LOGO_LOCAL}" class="w-12 h-12 rounded-full object-cover">
+                                        <div><h4 class="font-bold text-sm text-white">${partnerData.nama}</h4><p class="text-xs text-gray-400">Ketuk untuk membuka obrolan</p></div>
+                                    </div>
+                                </div>`;
+                        }
+                    }
+                });
+            });
+        }
+
+        window.openChatRoom = async (partnerUid, partnerName, partnerPhoto) => {
+            currentChatPartnerUid = partnerUid;
+            switchView('view-chat-room', `Chat: ${partnerName}`);
+            document.getElementById('chat-partner-name').innerText = partnerName;
+            document.getElementById('chat-partner-img').src = partnerPhoto || LOGO_LOCAL;
+            const chatId = [window.currentUser.uid, partnerUid].sort().join('_');
+            const chatBox = document.getElementById('chat-messages-container');
+            const approvalBox = document.getElementById('chat-approval-box');
+            const chatInputArea = document.getElementById('chat-input-area');
+
+            const chatRef = doc(db, "chats", chatId);
+            const chatSnap = await getDoc(chatRef);
+            let disetujuiOleh = chatSnap.exists() ? (chatSnap.data().disetujuiOleh || [window.currentUser.uid]) : [window.currentUser.uid];
+            if(!chatSnap.exists()) await setDoc(chatRef, { disetujuiOleh: [window.currentUser.uid] }, { merge: true });
+
+            if(!disetujuiOleh.includes(window.currentUser.uid) || !disetujuiOleh.includes(partnerUid)) {
+                approvalBox.classList.remove('hidden'); chatInputArea.classList.add('hidden');
+                approvalBox.innerHTML = `<div class="p-6 text-center"><p class="text-xs text-emerald-300 mb-3">Obrolan memerlukan persetujuan.</p><button onclick="setujuiObrolan('${chatId}')" class="bg-emerald-600 text-white font-bold px-6 py-2 rounded-xl text-xs cursor-pointer">Setujui Obrolan</button></div>`;
+            } else { approvalBox.classList.add('hidden'); chatInputArea.classList.remove('hidden'); }
+
+            if(chatUnsubscribe) chatUnsubscribe();
+            chatUnsubscribe = onSnapshot(query(collection(db, "chats", chatId, "pesan")), (snapshot) => {
+                let msgList = [];
+                snapshot.forEach(docSnap => msgList.push(docSnap.data()));
+                msgList.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+                chatBox.innerHTML = "";
+                msgList.forEach(msg => {
+                    const isMe = msg.sender === window.currentUser.uid;
+                    chatBox.innerHTML += `<div class="flex ${isMe ? 'justify-end' : 'justify-start'} mb-2"><div class="${isMe ? 'bg-emerald-600 text-white' : 'glass-panel text-gray-200'} p-3 rounded-2xl max-w-xs text-sm"><p>${msg.text}</p></div></div>`;
+                });
+                chatBox.scrollTop = chatBox.scrollHeight;
+            });
+        };
+
+        window.setujuiObrolan = async (chatId) => {
+            await updateDoc(doc(db, "chats", chatId), { disetujuiOleh: arrayUnion(window.currentUser.uid) });
+            openChatRoom(currentChatPartnerUid, document.getElementById('chat-partner-name').innerText, document.getElementById('chat-partner-img').src);
+        };
+
+        window.sendChatMessage = async () => {
+            const input = document.getElementById('chat-input-message');
+            const text = input.value.trim();
+            if(!text || !currentChatPartnerUid || !window.currentUser) return;
+            const chatId = [window.currentUser.uid, currentChatPartnerUid].sort().join('_');
+            await addDoc(collection(db, "chats", chatId, "pesan"), { sender: window.currentUser.uid, text, dibaca: false, timestamp: Date.now() });
+            input.value = "";
+        };
+
+        function loadHomeFeedAndStories() {
+            if(!window.currentUser) return;
+            onSnapshot(collection(db, "users"), (snapshot) => {
+                const storiesContainer = document.getElementById('home-stories-container');
+                if(!storiesContainer) return;
+                let storiesHtml = "";
+                snapshot.forEach(docSnap => {
+                    const uData = docSnap.data();
+                    const hasActiveStatus = uData.statusAktifHingga && uData.statusAktifHingga > Date.now();
+                    const ringStyle = hasActiveStatus ? "story-ring p-0.5" : "border-2 border-gray-600 p-0.5";
+                    storiesHtml += `
+                        <div onclick="handleStoryClick('${uData.uid}')" class="flex flex-col items-center cursor-pointer flex-shrink-0">
+                            <div class="w-16 h-16 rounded-full ${ringStyle} bg-black flex items-center justify-center">
+                                <img src="${uData.fotoProfil || LOGO_LOCAL}" class="w-full h-full rounded-full object-cover">
+                            </div>
+                            <span class="text-xs mt-1 truncate w-16 text-center font-medium">${uData.nama}</span>
+                        </div>`;
+                });
+                storiesContainer.innerHTML = storiesHtml;
+            });
+
+            onSnapshot(collection(db, "postingan_pribadi"), async (snapshot) => {
+                const feedContainer = document.getElementById('home-feed-container');
+                if (!feedContainer) return;
+                let posts = [];
+                snapshot.forEach(d => posts.push({ id: d.id, ...d.data() }));
+                posts.sort((a,b) => b.timestamp - a.timestamp);
+                let feedHtml = "";
+                for (const post of posts) {
+                    const uSnap = await getDoc(doc(db, "users", post.uid));
+                    const uData = uSnap.exists() ? uSnap.data() : { nama: "Warga", fotoProfil: LOGO_LOCAL, username: "warga" };
+                    feedHtml += `
+                        <div class="glass-panel rounded-3xl mb-6 overflow-hidden text-left p-4">
+                            <div class="flex items-center gap-3 mb-2 cursor-pointer" onclick="openUserProfile('${post.uid}')">
+                                <img src="${uData.fotoProfil}" class="w-10 h-10 rounded-full object-cover border border-emerald-500">
+                                <div><h4 class="font-bold text-sm text-white">${uData.nama}</h4><span class="text-[10px] text-emerald-400">@${uData.username}</span></div>
+                            </div>
+                            <p class="text-sm text-gray-200 mb-2">${post.konten}</p>
+                            ${post.mediaUrl ? `<img src="${post.mediaUrl}" class="w-full h-auto max-h-96 rounded-xl object-cover border border-gray-700">` : ""}
+                            <button onclick="openChatRoom('${post.uid}', '${uData.nama}', '${uData.fotoProfil}')" class="mt-3 text-emerald-400 text-xs font-bold underline cursor-pointer">💬 Kirim Pesan</button>
+                        </div>`;
+                }
+                feedContainer.innerHTML = feedHtml || `<p class="text-xs text-gray-400 italic text-center py-6">Belum ada postingan.</p>`;
+            });
+        }
+
+        window.switchView = (viewId, title) => {
+            const activeViewEl = document.querySelector('.app-view:not(.hidden)');
+            if (activeViewEl && activeViewEl.id !== 'view-user-profile' && viewId !== 'view-user-profile') previousViewBeforeUser = activeViewEl.id;
+
+            document.querySelectorAll('.app-view').forEach(el => el.classList.add('hidden'));
+            const targetView = document.getElementById(viewId);
+            if(targetView) targetView.classList.remove('hidden');
+            document.getElementById('page-title').innerText = title;
+            if(viewId === 'view-peta' && mapInstance) setTimeout(() => mapInstance.invalidateSize(), 100);
+            if(viewId === 'view-analisis') loadAnalisisData();
+            if(viewId === 'view-leaderboard') loadLeaderboardMingguan();
+            if(viewId === 'view-profil') startMyProfileRealtimeSync();
+            if(viewId === 'view-notifikasi') loadNotificationsListener();
+            toggleSidebarMobile(false);
+        };
+
+        window.toggleSidebarMobile = (forceState) => {
+            const sidebar = document.getElementById('sidebar-menu');
+            if (sidebar) sidebar.classList.toggle('-translate-x-full', typeof forceState === 'boolean' ? !forceState : undefined);
+        };
+
+        window.loadNightModePref = () => { document.body.classList.add('dark-mode'); };
+        window.showNotificationModal = (title, message, isSuccess = true) => {
+            const modal = document.getElementById('notification-modal');
+            if(!modal) return;
+            modal.innerHTML = `<div class="glass-panel rounded-3xl w-full max-w-sm p-6 text-center animate-scale-up neon-border"><h3 class="text-2xl font-bold text-white mb-2">${title}</h3><p class="text-gray-300 text-sm mb-6">${message}</p><button onclick="closeNotificationModal()" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl cursor-pointer">Mengerti</button></div>`;
+            modal.classList.remove('hidden');
+        };
+    </script>
+    <style>
+        body { background-color: #050a0f !important; color: #e2e8f0 !important; font-family: 'Inter', sans-serif; -webkit-tap-highlight-color: transparent; }
+        .glass-panel { background: rgba(16, 185, 129, 0.05); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(16, 185, 129, 0.2); box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5); }
+        .neon-text { text-shadow: 0 0 10px rgba(16, 185, 129, 0.7); }
+        .neon-border { box-shadow: 0 0 15px rgba(16, 185, 129, 0.3); border: 1px solid rgba(16,185,129,0.5); }
+        .story-ring { background: linear-gradient(45deg, #f09433 0%, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%); padding: 2.5px; display: inline-block; border-radius: 9999px; }
+        
+        @keyframes badgeBlink {
+            0%, 100% { opacity: 1; transform: scale(1); filter: brightness(1); }
+            50% { opacity: 0.7; transform: scale(1.05); filter: brightness(1.3); }
+        }
+        .badge-blink { animation: badgeBlink 1.5s ease-in-out infinite; }
+
+        .dark-mode input, .dark-mode textarea { background-color: rgba(0,0,0,0.5) !important; color: #fff !important; border-color: rgba(16,185,129,0.3) !important; -webkit-appearance: none; }
+        @keyframes scaleUp { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        .animate-scale-up { animation: scaleUp 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+    </style>
+</head>
+<body class="font-sans dark-mode" onload="loadNightModePref();">
+
+    <div id="splash-screen" class="hidden fixed inset-0 bg-[#050a0f] flex flex-col items-center justify-center z-[140] p-6 text-white text-center">
+        <div class="max-w-md w-full glass-panel p-10 rounded-3xl flex flex-col items-center relative">
+            <img src="logo.jpg" alt="Logo" class="w-32 h-32 rounded-full object-cover mb-6 border-4 border-emerald-400">
+            <h1 class="text-4xl font-extrabold mb-2 neon-text">GeoCare</h1>
+            <button onclick="startAppFromSplash()" class="w-full bg-emerald-600 text-white font-extrabold py-4 rounded-2xl neon-border cursor-pointer">MASUK SISTEM</button>
+        </div>
+    </div>
+
+    <div id="main-app" class="hidden h-screen flex w-full overflow-hidden bg-[#050a0f] relative">
+        <aside id="sidebar-menu" class="absolute md:relative inset-y-0 left-0 transform -translate-x-full md:translate-x-0 transition duration-200 w-64 glass-panel text-white flex flex-col shadow-2xl z-40">
+            <div class="p-6 border-b border-white/10 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <div class="w-10 h-10 rounded-full bg-emerald-500/20 border border-emerald-400 flex items-center justify-center neon-text font-bold">GC</div>
+                    <div><h2 class="text-xl font-extrabold neon-text">GeoCare</h2></div>
+                </div>
+                <button onclick="toggleSidebarMobile(false)" class="md:hidden text-emerald-400 text-xl font-bold cursor-pointer">✕</button>
+            </div>
+            <nav class="flex-1 p-4 space-y-2 mt-2 overflow-y-auto">
+                <button onclick="switchView('view-beranda', 'Beranda Sistem')" class="w-full flex items-center gap-3 py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer"><span>🏠</span> Beranda</button>
+                <button onclick="switchView('view-peta', 'Peta Bank Sampah')" class="w-full flex items-center gap-3 py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer"><span>🗺️</span> Peta Lokasi</button>
+                <button onclick="switchView('view-cari-user', 'Cari Pengguna')" class="w-full flex items-center gap-3 py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer"><span>🔍</span> Cari Warga</button>
+                <button onclick="switchView('view-leaderboard', 'Peringkat Warga')" class="w-full flex items-center gap-3 py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer"><span>🏆</span> Peringkat 7 Hari</button>
+                <button onclick="switchView('view-notifikasi', 'Notifikasi & Permintaan')" class="w-full flex items-center justify-between py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer">
+                    <span class="flex items-center gap-3"><span>🔔</span> Notifikasi</span>
+                    <span id="menu-notif-badge" class="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full font-bold" style="display:none;">0</span>
+                </button>
+                <button onclick="switchView('view-analisis', 'Analisis Data')" class="w-full flex items-center gap-3 py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer"><span>📈</span> Analisis Data</button>
+                <button onclick="switchView('view-pesan', 'Pesan & Obrolan')" class="w-full flex items-center justify-between py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer">
+                    <span class="flex items-center gap-3"><span>💬</span> Obrolan Warga</span>
+                    <span id="menu-chat-badge" class="bg-red-500 text-white text-[10px] px-2 py-0.5 rounded-full font-bold" style="display:none;">0</span>
+                </button>
+                <button onclick="switchView('view-profil', 'ID Profil Anda')" class="w-full flex items-center gap-3 py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-sm font-medium cursor-pointer"><span>👤</span> Profil Pengguna</button>
+                <button onclick="openCustomerServiceAdmin()" class="w-full flex items-center gap-3 py-3 px-4 rounded-xl hover:bg-emerald-500/10 text-emerald-300 text-sm font-medium cursor-pointer"><span>🎧</span> Customer Service</button>
+                <button onclick="switchView('view-admin-mod', 'Terminal Admin')" class="admin-only hidden w-full items-center gap-3 py-3 px-4 rounded-xl bg-red-900/20 text-red-400 text-sm font-medium cursor-pointer"><span>🛡️</span> Panel Admin</button>
+            </nav>
+            <div class="p-4 border-t border-white/10">
+                <button onclick="logout()" class="w-full bg-red-500/10 text-red-400 py-3 rounded-xl text-sm font-bold cursor-pointer">Logout</button>
+            </div>
+        </aside>
+
+        <main class="flex-1 flex flex-col h-screen overflow-hidden relative">
+            <header class="glass-panel h-20 px-6 md:px-8 flex items-center justify-between z-10">
+                <div class="flex items-center gap-3">
+                    <button onclick="toggleSidebarMobile(true)" class="text-white p-2 text-xl font-bold md:hidden cursor-pointer">☰</button>
+                    <h1 id="page-title" class="text-lg md:text-xl font-bold text-white tracking-wide">Beranda Sistem</h1>
+                </div>
+            </header>
+
+            <div class="flex-1 overflow-y-auto p-4 md:p-8 relative">
+                
+                <!-- VIEW BERANDA -->
+                <div id="view-beranda" class="app-view relative max-w-xl mx-auto">
+                    <div class="flex gap-2 mb-6">
+                        <button onclick="bukaModalTambahPostingan()" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 rounded-2xl text-xs neon-border cursor-pointer">✍️ Buat Postingan</button>
+                        <button onclick="bukaModalBuatStatus()" class="flex-1 bg-emerald-900/50 border border-emerald-500/50 hover:bg-emerald-900 text-emerald-300 font-bold py-3 px-4 rounded-2xl text-xs cursor-pointer">📸 Status 24 Jam</button>
+                    </div>
+                    <div class="mb-6"><div id="informasi-publik-container"></div></div>
+                    <div class="glass-panel p-4 rounded-2xl mb-6 overflow-x-auto flex gap-4 items-center">
+                        <div id="home-stories-container" class="flex gap-4 items-center"></div>
+                    </div>
+                    <h4 class="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3">Sinyal Komunitas</h4>
+                    <div id="home-feed-container" class="space-y-6"></div>
+                </div>
+
+                <!-- VIEW PETA -->
+                <div id="view-peta" class="app-view hidden max-w-4xl mx-auto h-[80vh] flex flex-col">
+                    <div class="glass-panel p-4 rounded-2xl mb-3">
+                        <h3 class="text-sm font-bold text-white mb-2">🔍 Cari Titik Bank Sampah</h3>
+                        <div class="flex gap-2">
+                            <input type="text" id="input-cari-lokasi" placeholder="Ketik nama atau kode titik..." class="flex-1 bg-black/40 border p-2.5 rounded-xl text-white text-xs outline-none">
+                            <button onclick="cariLokasiBankSampah()" class="bg-emerald-600 text-white font-bold px-4 py-2.5 rounded-xl text-xs cursor-pointer">Cari</button>
+                        </div>
+                        <div id="hasil-cari-lokasi-container" class="mt-2 space-y-1"></div>
+                    </div>
+                    <div id="map" class="flex-1 w-full rounded-2xl border border-emerald-500/30 z-0"></div>
+                </div>
+
+                <!-- VIEW NOTIFIKASI -->
+                <div id="view-notifikasi" class="app-view hidden max-w-xl mx-auto">
+                    <div class="glass-panel p-6 rounded-3xl mb-4">
+                        <h3 class="text-xl font-bold text-white mb-1">Notifikasi & Permintaan Mengikuti</h3>
+                        <p class="text-xs text-gray-400">Setujui atau tolak permintaan dari warga yang ingin mengikuti akun privat Anda.</p>
+                    </div>
+                    <div id="notifikasi-container" class="space-y-3"></div>
+                </div>
+
+                <!-- VIEW CARI USER -->
+                <div id="view-cari-user" class="app-view hidden max-w-xl mx-auto">
+                    <div class="glass-panel p-6 rounded-3xl mb-6">
+                        <h3 class="text-xl font-bold text-white mb-4">Cari Warga Lain</h3>
+                        <div class="mb-4">
+                            <input type="text" id="input-cari-user" oninput="handleLiveSearchUser(event)" placeholder="Ketik username atau nama warga..." class="w-full bg-black/40 border p-3 rounded-xl text-white text-sm outline-none">
+                        </div>
+                        <button onclick="cariWargaDalamRadius100m()" class="w-full bg-emerald-900/50 border border-emerald-400 text-emerald-300 font-bold py-3 rounded-xl text-xs mb-4 cursor-pointer">📍 Cari Warga di Sekitar (Radius 100m)</button>
+                        <div id="hasil-pencarian-user-container" class="space-y-2"></div>
+                    </div>
+                </div>
+
+                <!-- VIEW LEADERBOARD MINGGUAN -->
+                <div id="view-leaderboard" class="app-view hidden max-w-4xl mx-auto">
+                    <div class="glass-panel p-6 rounded-3xl mb-6 text-center neon-border">
+                        <h2 class="text-2xl font-bold text-white neon-text mb-1">Peringkat 7 Hari Terakhir</h2>
+                        <p class="text-xs text-gray-300">Pembaruan otomatis berdasarkan kontribusi penyetoran sampah warga.</p>
+                    </div>
+                    <div id="leaderboard-container"></div>
+                </div>
+
+                <!-- VIEW ANALISIS -->
+                <div id="view-analisis" class="app-view hidden max-w-4xl mx-auto">
+                    <div class="glass-panel p-6 rounded-3xl mb-6 border border-emerald-500/20">
+                        <h3 class="text-xl font-bold text-white mb-4">Grafik Pengelolaan Sektoral Kota</h3>
+                        <div class="h-[300px] w-full"><canvas id="analisisChart"></canvas></div>
+                    </div>
+                    <div id="analisis-publish-container" class="grid grid-cols-1 md:grid-cols-3 gap-4"></div>
+                </div>
+
+                <!-- VIEW OBROLAN -->
+                <div id="view-pesan" class="app-view hidden max-w-2xl mx-auto">
+                    <div class="glass-panel p-6 rounded-3xl mb-4"><h3 class="text-xl font-bold text-white">Obrolan Aktif Warga</h3></div>
+                    <div id="chat-user-list" class="space-y-3"></div>
+                </div>
+
+                <div id="view-chat-room" class="app-view hidden max-w-2xl mx-auto flex flex-col h-[75vh]">
+                    <div class="glass-panel p-4 rounded-2xl flex items-center gap-3 mb-3">
+                        <img id="chat-partner-img" src="logo.jpg" class="w-10 h-10 rounded-full object-cover">
+                        <h3 id="chat-partner-name" class="font-bold text-white">Partner</h3>
+                    </div>
+                    <div id="chat-approval-box" class="glass-panel rounded-2xl mb-3 hidden"></div>
+                    <div id="chat-messages-container" class="flex-1 glass-panel p-4 rounded-2xl overflow-y-auto mb-3 space-y-2"></div>
+                    <div id="chat-input-area" class="flex gap-2">
+                        <input type="text" id="chat-input-message" placeholder="Tulis pesan..." class="flex-1 bg-black/40 border p-3 rounded-xl text-white outline-none text-sm">
+                        <button onclick="sendChatMessage()" class="bg-emerald-600 text-white font-bold px-6 py-3 rounded-xl text-xs cursor-pointer">Kirim</button>
+                    </div>
+                </div>
+
+                <!-- VIEW PROFIL -->
+                <div id="view-profil" class="app-view hidden max-w-2xl mx-auto">
+                    <div class="glass-panel p-8 rounded-3xl border border-emerald-500/20 text-center">
+                        <img id="my-profile-img" src="logo.jpg" class="w-24 h-24 rounded-full object-cover mx-auto mb-4 border-2 border-emerald-500">
+                        <h2 id="my-profile-name" class="text-2xl font-bold text-white">Nama</h2>
+                        <p id="my-profile-username" class="text-emerald-400 text-sm mb-3">@username</p>
+                        
+                        <div class="flex justify-center gap-6 mb-4 text-sm font-bold text-gray-300">
+                            <div><span id="my-followers-count" class="text-white">0</span> Pengikut</div>
+                            <div><span id="my-following-count" class="text-white">0</span> Mengikuti</div>
+                        </div>
+
+                        <div class="glass-panel p-4 rounded-2xl mb-4 flex items-center justify-between text-xs">
+                            <span class="text-gray-300 font-semibold">🔒 Privat Akun (Perlu Persetujuan Follow)</span>
+                            <input type="checkbox" id="account-privacy-toggle" onchange="toggleAccountPrivacy(this)" class="w-5 h-5 accent-emerald-500 cursor-pointer">
+                        </div>
+
+                        <div id="my-eco-badge" class="mb-4"></div>
+                        <button onclick="ajukanSetorSampahWarga()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3.5 rounded-2xl text-xs mb-3 neon-border cursor-pointer">🔄 Upgrade Partisipasi (Setor Sampah)</button>
+                        <button onclick="bukaModalGantiFoto()" class="w-full bg-emerald-900/50 border border-emerald-500 text-emerald-300 font-bold py-3 rounded-2xl text-xs mb-4 cursor-pointer">Ganti Foto Profil</button>
+                        <p class="text-emerald-400 font-bold text-lg">Total Partisipasi: <span id="my-total-gram">0</span> Gram</p>
+                    </div>
+                </div>
+
+                <!-- VIEW PROFIL WARGA LAIN -->
+                <div id="view-user-profile" class="app-view hidden max-w-2xl mx-auto">
+                    <div class="glass-panel p-8 rounded-3xl border border-emerald-500/20 text-center relative">
+                        <button onclick="goBackFromUserProfile()" class="absolute top-6 left-6 text-emerald-400 text-xs font-bold cursor-pointer">← Kembali</button>
+                        <img id="other-profile-img" src="logo.jpg" class="w-24 h-24 rounded-full object-cover mx-auto mb-4 border-2 border-emerald-500">
+                        <h2 id="other-profile-name" class="text-2xl font-bold text-white">Nama</h2>
+                        <p id="other-profile-username" class="text-emerald-400 text-sm mb-3">@username</p>
+                        
+                        <div class="flex justify-center gap-6 mb-4 text-sm font-bold text-gray-300">
+                            <div><span id="other-followers-count" class="text-white">0</span> Pengikut</div>
+                            <div><span id="other-following-count" class="text-white">0</span> Mengikuti</div>
+                        </div>
+
+                        <div id="other-eco-badge" class="mb-4"></div>
+                        <button id="btn-other-follow" class="w-full bg-emerald-600 text-white font-bold py-2.5 rounded-xl text-xs mb-3 cursor-pointer">Ikuti</button>
+                        <p id="other-profile-bio" class="text-gray-400 text-sm mb-4">Biodata</p>
+                        <p class="text-emerald-400 font-bold text-lg mb-2">Total Partisipasi: <span id="other-total-gram">0</span> Gram</p>
+                        <div id="other-restricted-section"></div>
+                    </div>
+                </div>
+
+                <!-- VIEW PANEL ADMIN -->
+                <div id="view-admin-mod" class="app-view hidden max-w-4xl mx-auto space-y-6">
+                    <div class="glass-panel p-8 rounded-3xl border border-emerald-500/50 text-left">
+                        <h3 class="text-xl font-bold text-emerald-400 mb-2">Daftar Pengajuan Setor Sampah Warga</h3>
+                        <p class="text-xs text-gray-400 mb-4">Warga yang menekan tombol Upgrade Partisipasi akan muncul di sini untuk diverifikasi atau dihapus manual.</p>
+                        <div id="admin-pengajuan-setor-container" class="space-y-2"></div>
+                    </div>
+
+                    <div class="glass-panel p-8 rounded-3xl border border-emerald-500/50 text-left">
+                        <h3 class="text-xl font-bold text-emerald-400 mb-2">Kelola Partisipasi Seluruh Warga</h3>
+                        <p class="text-xs text-gray-400 mb-4">Admin dapat meng-upgrade atau mereset poin partisipasi warga menjadi 0 gram.</p>
+                        <div id="admin-partisipasi-warga-container" class="space-y-2"></div>
+                    </div>
+
+                    <div class="glass-panel p-8 rounded-3xl border border-red-500/30 text-left">
+                        <h2 class="text-2xl font-bold mb-2 text-white">Terminal Keamanan Akun</h2>
+                        <div id="admin-user-list-container"></div>
+                    </div>
+
+                    <div class="glass-panel p-8 rounded-3xl border border-emerald-500/50 text-left">
+                        <h3 class="text-xl font-bold text-emerald-400 mb-2">Tambah Titik Lokasi Peta</h3>
+                        <form id="form-tambah-lokasi" onsubmit="tambahLokasiPetaAdmin(event)" class="space-y-4">
+                            <input type="text" id="admin-lokasi-nama" required placeholder="Nama Lokasi" class="w-full bg-black/40 border p-3 rounded-xl text-white outline-none">
+                            <input type="text" id="admin-lokasi-kode" required placeholder="Kode Titik (BS-001)" class="w-full bg-black/40 border p-3 rounded-xl text-white outline-none">
+                            <div class="flex gap-3">
+                                <input type="number" step="any" id="admin-lokasi-lat" required placeholder="Latitude" class="flex-1 bg-black/40 border p-3 rounded-xl text-white outline-none">
+                                <input type="number" step="any" id="admin-lokasi-lng" required placeholder="Longitude" class="flex-1 bg-black/40 border p-3 rounded-xl text-white outline-none">
+                            </div>
+                            <button type="submit" class="bg-emerald-600 text-white font-bold px-6 py-3 rounded-xl w-full cursor-pointer">Tambah Titik</button>
+                        </form>
+                    </div>
+
+                    <div class="glass-panel p-8 rounded-3xl border border-emerald-500/50 text-left">
+                        <h3 class="text-xl font-bold text-emerald-400 mb-2">Tambah Informasi Publik</h3>
+                        <form onsubmit="tambahInformasiPublikAdmin(event)" class="space-y-4">
+                            <input type="text" id="admin-info-judul" required placeholder="Judul" class="w-full bg-black/40 border p-3 rounded-xl text-white outline-none">
+                            <textarea id="admin-info-isi" required placeholder="Isi..." class="w-full bg-black/40 border p-3 rounded-xl text-white outline-none h-24"></textarea>
+                            <button type="submit" class="bg-emerald-600 text-white font-bold px-6 py-3 rounded-xl w-full cursor-pointer">Publikasikan</button>
+                        </form>
+                    </div>
+
+                    <div class="glass-panel p-8 rounded-3xl border border-emerald-500/50 text-left">
+                        <h3 class="text-xl font-bold text-emerald-400 mb-2">Reset Data Analisis Kota (Gram)</h3>
+                        <form onsubmit="simpanAnalisisAdmin(event)" class="space-y-4">
+                            <input type="number" step="any" id="input-analisis-total" required placeholder="Total Gram (Cth: 1250000)" class="w-full bg-black/40 border p-3 rounded-xl text-white outline-none">
+                            <input type="number" id="input-analisis-warga" required placeholder="Warga Aktif" class="w-full bg-black/40 border p-3 rounded-xl text-white outline-none">
+                            <input type="number" id="input-analisis-target" required placeholder="Target %" class="w-full bg-black/40 border p-3 rounded-xl text-white outline-none">
+                            <button type="submit" class="bg-emerald-600 text-white font-bold px-6 py-3 rounded-xl w-full cursor-pointer">Simpan Data</button>
+                        </form>
+                    </div>
+                </div>
+
+            </div>
+        </main>
+    </div>
+
+    <div id="login-screen" class="min-h-screen flex items-center justify-center bg-[#050a0f] p-4 absolute inset-0 z-50">
+        <div class="glass-panel p-10 rounded-3xl text-center max-w-md w-full neon-border">
+            <h1 class="text-4xl font-extrabold text-white mb-2 neon-text">GeoCare</h1>
+            <button id="btn-login" class="w-full bg-emerald-600 text-white font-bold py-4 rounded-xl hover:bg-emerald-500 cursor-pointer">Otentikasi Google ID</button>
+        </div>
+    </div>
+    
+    <div id="username-modal" class="hidden fixed inset-0 bg-[#050a0f]/90 flex items-center justify-center z-[70] p-4">
+        <div class="glass-panel rounded-3xl w-full max-w-md p-8 text-center neon-border">
+            <h3 class="text-2xl font-bold mb-4 text-white">Buat Username</h3>
+            <form onsubmit="saveUsername(event)">
+                <input type="text" id="input-username" required placeholder="username" class="w-full border bg-black/40 p-3 rounded-xl mb-2 text-white outline-none">
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl cursor-pointer">Lanjutkan</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="profile-modal" class="hidden fixed inset-0 bg-[#050a0f]/90 flex items-center justify-center z-[60] p-4">
+        <div class="glass-panel rounded-3xl w-full max-w-2xl p-8 text-left neon-border">
+            <h3 class="text-2xl font-bold mb-2 text-white">Lengkapi Data Diri</h3>
+            <form onsubmit="saveProfile(event)" class="space-y-4">
+                <input type="email" id="prof-email" class="w-full border p-3 rounded-xl bg-gray-900 border-gray-700" readonly>
+                <input type="tel" id="prof-telepon" required placeholder="No Telepon" class="w-full border p-3 rounded-xl bg-black/40 text-white">
+                <textarea id="prof-alamat" required placeholder="Alamat" class="w-full border p-3 rounded-xl bg-black/40 text-white h-20"></textarea>
+                <input type="text" id="prof-ttl" required placeholder="Tempat, Tanggal Lahir" class="w-full border p-3 rounded-xl bg-black/40 text-white">
+                <button type="submit" class="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl cursor-pointer">Simpan & Masuk</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="banned-modal" class="hidden fixed inset-0 bg-red-950/90 flex items-center justify-center z-[100] p-4 text-center">
+        <div class="glass-panel rounded-3xl p-8 max-w-md border border-red-500">
+            <h2 class="text-2xl font-bold text-white mb-2">Akses Ditolak</h2>
+            <p id="banned-reason-text" class="text-red-300 text-sm mb-6">Akun diblokir.</p>
+            <button onclick="logout()" class="w-full bg-red-600 text-white font-bold py-3 rounded-xl cursor-pointer">Keluar</button>
+        </div>
+    </div>
+
+    <div id="notification-modal" class="hidden fixed inset-0 bg-black/80 flex items-center justify-center z-[80] p-4 backdrop-blur-sm"></div>
+</body>
+</html>
